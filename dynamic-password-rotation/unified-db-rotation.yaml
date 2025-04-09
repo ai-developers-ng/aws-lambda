@@ -1,0 +1,189 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Unified DB password rotation Lambda for PostgreSQL, MariaDB, Oracle with layers and tagging
+
+Parameters:
+  ExistingSecretArn:
+    Type: String
+    Description: ARN or name of the existing secret
+  LambdaFunctionName:
+    Type: String
+    Default: DBRotationFunction
+    Description: Name for the rotation Lambda function
+  ExistingLayerArns:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: Comma-separated list of existing Lambda Layer ARNs (e.g., for psycopg2, pymysql, cx_Oracle)
+  Environment:
+    Type: String
+    Default: dev
+    Description: Environment tag (e.g., dev, staging, prod)
+  Project:
+    Type: String
+    Default: UnifiedDBRotation
+    Description: Project or application name
+
+Resources:
+
+  RotationLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${LambdaFunctionName}-ExecutionRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DBRotationPermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:PutSecretValue
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:UpdateSecretVersionStage
+                Resource: !Ref ExistingSecretArn
+              - Effect: Allow
+                Action:
+                  - rds:DescribeDBInstances
+                  - rds:ModifyDBInstance
+                  - rds:DescribeDBClusters
+                  - rds:ModifyDBCluster
+                Resource: "*"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref Project
+
+  DBRotationLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref LambdaFunctionName
+      Handler: index.lambda_handler
+      Runtime: python3.9
+      Timeout: 60
+      MemorySize: 256
+      Role: !GetAtt RotationLambdaExecutionRole.Arn
+      Layers: !Ref ExistingLayerArns
+      Code:
+        ZipFile: |
+          import boto3, json, logging, random, string
+          import pymysql, psycopg2, cx_Oracle
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          secretsmanager = boto3.client('secretsmanager')
+
+          def lambda_handler(event, context):
+              arn = event['SecretId']
+              token = event['ClientRequestToken']
+              step = event['Step']
+              metadata = secretsmanager.describe_secret(SecretId=arn)
+
+              if not metadata['RotationEnabled']:
+                  raise ValueError("Rotation not enabled")
+              if token not in metadata['VersionIdsToStages'] or 'AWSPENDING' not in metadata['VersionIdsToStages'][token]:
+                  raise ValueError("Invalid token or stage")
+
+              if step == "createSecret":
+                  create_secret(arn, token)
+              elif step == "setSecret":
+                  set_secret(arn, token)
+              elif step == "testSecret":
+                  pass
+              elif step == "finishSecret":
+                  finish_secret(arn, token)
+
+          def create_secret(arn, token):
+              current = secretsmanager.get_secret_value(SecretId=arn, VersionStage="AWSCURRENT")
+              secret_dict = json.loads(current['SecretString'])
+              secret_dict['password'] = ''.join(random.choices(string.ascii_letters + string.digits + '!@#$%^&*()', k=20))
+              secretsmanager.put_secret_value(
+                  SecretId=arn,
+                  ClientRequestToken=token,
+                  SecretString=json.dumps(secret_dict),
+                  VersionStages=['AWSPENDING']
+              )
+
+          def set_secret(arn, token):
+              pending = json.loads(secretsmanager.get_secret_value(
+                  SecretId=arn, VersionId=token, VersionStage="AWSPENDING")['SecretString'])
+              current = json.loads(secretsmanager.get_secret_value(
+                  SecretId=arn, VersionStage="AWSCURRENT")['SecretString'])
+              engine = current.get('engine', '').lower()
+
+              if engine in ['postgres', 'postgresql']:
+                  rotate_postgres(current, pending)
+              elif engine in ['mysql', 'mariadb']:
+                  rotate_mariadb(current, pending)
+              elif engine == 'oracle':
+                  rotate_oracle(current, pending)
+              else:
+                  raise ValueError(f"Unsupported engine: {engine}")
+
+          def rotate_postgres(current, pending):
+              conn = psycopg2.connect(
+                  host=current['host'], port=current['port'],
+                  user=current['username'], password=current['password'],
+                  dbname=current['dbname']
+              )
+              conn.autocommit = True
+              with conn.cursor() as cur:
+                  cur.execute(f"ALTER USER {pending['username']} WITH PASSWORD %s", (pending['password'],))
+              conn.close()
+
+          def rotate_mariadb(current, pending):
+              conn = pymysql.connect(
+                  host=current['host'], port=int(current['port']),
+                  user=current['username'], password=current['password'],
+                  database=current['dbname'], connect_timeout=10
+              )
+              with conn.cursor() as cur:
+                  cur.execute(f"ALTER USER '{pending['username']}'@'%' IDENTIFIED BY %s", (pending['password'],))
+                  conn.commit()
+              conn.close()
+
+          def rotate_oracle(current, pending):
+              dsn = cx_Oracle.makedsn(current['host'], int(current['port']), sid=current.get('sid', 'ORCL'))
+              conn = cx_Oracle.connect(user=current['username'], password=current['password'], dsn=dsn)
+              cur = conn.cursor()
+              cur.execute(f"ALTER USER {pending['username']} IDENTIFIED BY \"{pending['password']}\"")
+              conn.commit()
+              cur.close()
+              conn.close()
+
+          def finish_secret(arn, token):
+              metadata = secretsmanager.describe_secret(SecretId=arn)
+              current_version = [k for k, v in metadata['VersionIdsToStages'].items() if 'AWSCURRENT' in v][0]
+              if current_version != token:
+                  secretsmanager.update_secret_version_stage(
+                      SecretId=arn, VersionStage='AWSCURRENT',
+                      MoveToVersionId=token, RemoveFromVersionId=current_version
+                  )
+
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref Project
+
+  RotationSchedule:
+    Type: AWS::SecretsManager::RotationSchedule
+    Properties:
+      SecretId: !Ref ExistingSecretArn
+      RotationLambdaARN: !GetAtt DBRotationLambda.Arn
+      RotationRules:
+        AutomaticallyAfterDays: 30
+
+Outputs:
+  LambdaFunction:
+    Value: !Ref DBRotationLambda
+  SecretRotationEnabled:
+    Value: !Ref ExistingSecretArn
