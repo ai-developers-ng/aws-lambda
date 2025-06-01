@@ -7,14 +7,13 @@ import logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# Define the file count threshold
-FILE_COUNT_THRESHOLD = 200
+# Define the maximum number of files to process
+PROCESS_LIMIT = 60
 
 def lambda_handler(event, context):
     """
-    If a bucket has less than 200 files, it re-uploads them with a 5-sec delay
-    and sends an SNS alert with the list of re-uploaded files. Otherwise, it
-    sends an alert that the threshold was exceeded.
+    Lists files in an S3 bucket, re-uploads only the first 60 files found,
+    and sends an SNS alert with the list of the files that were re-uploaded.
 
     :param event: AWS Lambda uses this parameter to pass in event data.
     :param context: AWS Lambda uses this parameter to provide runtime information.
@@ -26,10 +25,7 @@ def lambda_handler(event, context):
     # Validate environment variables
     if not bucket_name or not sns_topic_arn:
         logger.error("S3_BUCKET_NAME and/or SNS_TOPIC_ARN environment variables not set.")
-        return {
-            'statusCode': 500,
-            'body': 'S3_BUCKET_NAME and/or SNS_TOPIC_ARN environment variables not set.'
-        }
+        return {'statusCode': 500, 'body': 'Environment variables not set.'}
 
     s3_client = boto3.client('s3')
     sns_client = boto3.client('sns')
@@ -39,37 +35,22 @@ def lambda_handler(event, context):
         paginator = s3_client.get_paginator('list_objects_v2')
         pages = paginator.paginate(Bucket=bucket_name)
         
-        files_to_process = []
+        all_files_in_bucket = []
         for page in pages:
             if 'Contents' in page:
-                files_to_process.extend(page['Contents'])
+                all_files_in_bucket.extend(page['Contents'])
         
-        file_count = len(files_to_process)
-        logger.info(f"Found {file_count} files in bucket: {bucket_name}")
+        total_file_count = len(all_files_in_bucket)
 
-        # --- Check if the file count is below the threshold ---
-        if file_count >= FILE_COUNT_THRESHOLD:
-            message = (f"Processing for S3 bucket '{bucket_name}' was skipped. "
-                       f"The bucket contains {file_count} files, which meets or exceeds the "
-                       f"threshold of {FILE_COUNT_THRESHOLD}.")
-            subject = f"SKIPPED: File Re-upload for S3 Bucket: {bucket_name}"
-            
-            logger.warning(message)
-            sns_client.publish(TopicArn=sns_topic_arn, Message=message, Subject=subject)
-            
-            return {
-                'statusCode': 200,
-                'body': message
-            }
-
-        # --- Proceed with re-upload if below threshold ---
-        if not files_to_process:
+        if total_file_count == 0:
             logger.info(f"No files found in bucket: {bucket_name}")
-            return {
-                'statusCode': 200,
-                'body': f'No files found in bucket: {bucket_name}'
-            }
-            
+            return {'statusCode': 200, 'body': f'No files found in bucket: {bucket_name}'}
+        
+        # --- Limit the list to the first 60 files ---
+        files_to_process = all_files_in_bucket[:PROCESS_LIMIT]
+        
+        logger.info(f"Found {total_file_count} total files. Processing the first {len(files_to_process)}.")
+
         reuploaded_files = []
         for file in files_to_process:
             file_key = file['Key']
@@ -89,9 +70,11 @@ def lambda_handler(event, context):
 
         # Send SNS alert with the list of re-uploaded files
         if reuploaded_files:
-            message_body = "The following files were successfully re-uploaded to the S3 bucket '{}':\n\n{}".format(
-                bucket_name,
-                "\n".join(reuploaded_files)
+            processed_count = len(reuploaded_files)
+            message_body = (
+                f"Successfully re-uploaded {processed_count} file(s) (out of {total_file_count} total) "
+                f"from the S3 bucket '{bucket_name}'.\n\nThe following files were processed:\n\n"
+                f'{"\n".join(reuploaded_files)}'
             )
             sns_subject = f"SUCCESS: File Re-upload Report for S3 Bucket: {bucket_name}"
 
@@ -100,7 +83,7 @@ def lambda_handler(event, context):
 
         return {
             'statusCode': 200,
-            'body': f'Successfully re-uploaded {len(reuploaded_files)} files to bucket: {bucket_name}'
+            'body': f'Successfully re-uploaded {len(reuploaded_files)} files.'
         }
 
     except Exception as e:
