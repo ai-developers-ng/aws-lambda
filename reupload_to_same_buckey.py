@@ -7,11 +7,14 @@ import logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
+# Define the file count threshold
+FILE_COUNT_THRESHOLD = 200
+
 def lambda_handler(event, context):
     """
-    Lists all files in an S3 bucket, re-uploads them to the same bucket
-    with a 5-second delay, and then sends an SNS alert with the list
-    of re-uploaded files.
+    If a bucket has less than 200 files, it re-uploads them with a 5-sec delay
+    and sends an SNS alert with the list of re-uploaded files. Otherwise, it
+    sends an alert that the threshold was exceeded.
 
     :param event: AWS Lambda uses this parameter to pass in event data.
     :param context: AWS Lambda uses this parameter to provide runtime information.
@@ -31,68 +34,69 @@ def lambda_handler(event, context):
     s3_client = boto3.client('s3')
     sns_client = boto3.client('sns')
 
-    reuploaded_files = []
-
     try:
         # Get the list of all files in the bucket
-        # Using paginator to handle buckets with more than 1000 objects
         paginator = s3_client.get_paginator('list_objects_v2')
         pages = paginator.paginate(Bucket=bucket_name)
-
+        
         files_to_process = []
         for page in pages:
             if 'Contents' in page:
                 files_to_process.extend(page['Contents'])
+        
+        file_count = len(files_to_process)
+        logger.info(f"Found {file_count} files in bucket: {bucket_name}")
 
+        # --- Check if the file count is below the threshold ---
+        if file_count >= FILE_COUNT_THRESHOLD:
+            message = (f"Processing for S3 bucket '{bucket_name}' was skipped. "
+                       f"The bucket contains {file_count} files, which meets or exceeds the "
+                       f"threshold of {FILE_COUNT_THRESHOLD}.")
+            subject = f"SKIPPED: File Re-upload for S3 Bucket: {bucket_name}"
+            
+            logger.warning(message)
+            sns_client.publish(TopicArn=sns_topic_arn, Message=message, Subject=subject)
+            
+            return {
+                'statusCode': 200,
+                'body': message
+            }
+
+        # --- Proceed with re-upload if below threshold ---
         if not files_to_process:
             logger.info(f"No files found in bucket: {bucket_name}")
             return {
                 'statusCode': 200,
                 'body': f'No files found in bucket: {bucket_name}'
             }
-
-        logger.info(f"Found {len(files_to_process)} files in bucket: {bucket_name}")
-
-        # Re-upload each file with a 5-second delay
+            
+        reuploaded_files = []
         for file in files_to_process:
             file_key = file['Key']
             logger.info(f"Processing file: {file_key}")
 
-            # Define the copy source
-            copy_source = {
-                'Bucket': bucket_name,
-                'Key': file_key
-            }
-
-            # Copy the object to itself to trigger a re-upload
+            copy_source = {'Bucket': bucket_name, 'Key': file_key}
             s3_client.copy_object(
                 Bucket=bucket_name,
                 Key=file_key,
                 CopySource=copy_source,
-                MetadataDirective='COPY' # Keeps original metadata
+                MetadataDirective='COPY'
             )
 
             logger.info(f"Successfully re-uploaded: {file_key}")
             reuploaded_files.append(file_key)
-
-            # Wait for 5 seconds before the next upload
             time.sleep(5)
 
-        # Send SNS alert if files were re-uploaded
+        # Send SNS alert with the list of re-uploaded files
         if reuploaded_files:
             message_body = "The following files were successfully re-uploaded to the S3 bucket '{}':\n\n{}".format(
                 bucket_name,
                 "\n".join(reuploaded_files)
             )
-            sns_subject = f"File Re-upload Report for S3 Bucket: {bucket_name}"
+            sns_subject = f"SUCCESS: File Re-upload Report for S3 Bucket: {bucket_name}"
 
-            logger.info("Sending SNS notification.")
-            sns_client.publish(
-                TopicArn=sns_topic_arn,
-                Message=message_body,
-                Subject=sns_subject
-            )
-            logger.info("SNS notification sent successfully.")
+            logger.info("Sending success SNS notification.")
+            sns_client.publish(TopicArn=sns_topic_arn, Message=message_body, Subject=sns_subject)
 
         return {
             'statusCode': 200,
@@ -101,7 +105,6 @@ def lambda_handler(event, context):
 
     except Exception as e:
         logger.error(f"An error occurred: {e}")
-        # Optionally, send an SNS alert on failure
         try:
             sns_client.publish(
                 TopicArn=sns_topic_arn,
@@ -114,4 +117,3 @@ def lambda_handler(event, context):
             'statusCode': 500,
             'body': f'An error occurred: {e}'
         }
-
