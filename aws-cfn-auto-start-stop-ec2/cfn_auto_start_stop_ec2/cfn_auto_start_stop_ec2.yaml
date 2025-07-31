@@ -95,10 +95,10 @@ Resources:
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: AutoStartEC2Instance
-      Runtime: python3.9
+      Runtime: python3.12
       MemorySize: 128
       Role: !GetAtt
-        - LambdaEC2Role
+        - LambdaEC2Role 
         - Arn
       Handler: index.lambda_handler
       Timeout: 60
@@ -167,7 +167,7 @@ Resources:
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: AutoStopEC2Instance
-      Runtime: python3.9
+      Runtime: python3.12
       MemorySize: 128
       Role: !GetAtt
         - LambdaEC2Role
@@ -239,7 +239,7 @@ Resources:
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: EC2StopWeekEnd
-      Runtime: python3.9
+      Runtime: python3.12
       MemorySize: 128
       Role: !GetAtt
         - LambdaEC2Role
@@ -344,7 +344,7 @@ Resources:
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: EC2StartWeekEnd
-      Runtime: python3.9
+      Runtime: python3.12
       MemorySize: 128
       Role: !GetAtt
         - LambdaEC2Role
@@ -480,7 +480,7 @@ Resources:
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: EC2StopWeekDay
-      Runtime: python3.9
+      Runtime: python3.12
       MemorySize: 128
       Role: !GetAtt
         - LambdaEC2Role
@@ -585,7 +585,7 @@ Resources:
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: EC2StartWeekDay
-      Runtime: python3.9
+      Runtime: python3.12
       MemorySize: 128
       Role: !GetAtt
         - LambdaEC2Role

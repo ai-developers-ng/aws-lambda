@@ -1,0 +1,5 @@
+# Requirements for EC2 Auto Start/Stop Lambda Layer
+# These packages will be included in the Lambda layer for shared use
+
+boto3>=1.34.0
+botocore>=1.34.0

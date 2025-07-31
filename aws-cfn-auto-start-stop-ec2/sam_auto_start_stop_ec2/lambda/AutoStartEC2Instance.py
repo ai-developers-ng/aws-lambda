@@ -1,35 +1,32 @@
-import boto3
-import logging
-import os
-
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-
-region = os.environ['AWS_REGION']
-ec2 = boto3.resource('ec2', region_name=region)
+from ec2_utils import configure_logging, get_ec2_client, get_instances_by_tag, start_ec2_instances
 
 def lambda_handler(event, context):
-
-    filters = [
-        {
-            'Name': 'tag:AutoStart',
-            'Values': ['TRUE','True','true']
-        },
-        {
-            'Name': 'instance-state-name',
-            'Values': ['stopped']
+    logger = configure_logging()
+    
+    try:
+        ec2_client = get_ec2_client()
+        
+        # Get stopped instances with AutoStart tag
+        stopped_instances = get_instances_by_tag(
+            ec2_client=ec2_client,
+            tag_name='AutoStart',
+            tag_values=['TRUE', 'True', 'true'],
+            instance_states=['stopped']
+        )
+        
+        logger.info(f"Found {len(stopped_instances)} stopped instances with AutoStart tag: {stopped_instances}")
+        
+        if stopped_instances:
+            start_ec2_instances(ec2_client, stopped_instances)
+            logger.info(f"Successfully initiated start for instances: {stopped_instances}")
+        else:
+            logger.info("No instances found in stopped state with AutoStart tag")
+            
+        return {
+            'statusCode': 200,
+            'body': f'Processed {len(stopped_instances)} instances for auto-start'
         }
-    ]
-
-    instances = ec2.instances.filter(Filters=filters)
-    StoppedInstances = [instance.id for instance in instances]
-    print("Stopped Instances with AutoStart Tag : " + str(StoppedInstances))
-
-    if len(StoppedInstances) > 0:
-        for instance in instances:
-            if instance.state['Name'] == 'stopped':
-                print("Starting Instance : " + instance.id)
-        AutoStarting = ec2.instances.filter(InstanceIds=StoppedInstances).start()
-        print("Started Instances : " + str(StoppedInstances))
-    else:
-        print("Instance not in Stopped state or AutoStart Tag not set...")
+        
+    except Exception as e:
+        logger.error(f"Error in AutoStartEC2Instance: {str(e)}")
+        raise

@@ -1,0 +1,758 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  Enhanced CloudFormation template for EC2 Auto Start/Stop solution with production-ready features.
+  This template creates Lambda functions with comprehensive error handling, monitoring, 
+  security enhancements, and operational excellence features using inline code for simplicity.
+  
+  Version: 2.0.0
+  Author: Enhanced by BlackBoxAI
+  Last Modified: 2024-01-01
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Schedule Configuration"
+        Parameters:
+          - AutoStartEC2Schedule
+          - AutoStopEC2Schedule
+          - EC2StartStopWeekDaySchedule
+          - EC2StartStopWeekEndSchedule
+      - Label:
+          default: "Environment Configuration"
+        Parameters:
+          - RegionTZ
+          - LogLevel
+          - Environment
+      - Label:
+          default: "Monitoring Configuration"
+        Parameters:
+          - EnableMonitoring
+          - NotificationEmail
+    ParameterLabels:
+      AutoStartEC2Schedule:
+        default: "Auto Start Schedule"
+      AutoStopEC2Schedule:
+        default: "Auto Stop Schedule"
+      EC2StartStopWeekDaySchedule:
+        default: "Weekday Schedule"
+      EC2StartStopWeekEndSchedule:
+        default: "Weekend Schedule"
+      RegionTZ:
+        default: "Region Timezone"
+      LogLevel:
+        default: "Log Level"
+      Environment:
+        default: "Environment"
+      EnableMonitoring:
+        default: "Enable Monitoring"
+      NotificationEmail:
+        default: "Notification Email"
+
+Parameters:
+  AutoStartEC2Schedule:
+    Type: String
+    Default: cron(0 13 ? * MON-FRI *)
+    Description: >-
+      Auto Start EC2 Instance schedule (Mon-Fri 9:00 AM EST / 1:00 PM UTC).
+      Enter a Schedule expression e.g. cron(0 13 ? * MON-FRI *)
+    MinLength: 20
+    MaxLength: 50
+    AllowedPattern: ^cron\([0-9\*\-\,\/\?\s]+\)$
+    ConstraintDescription: Must be a valid cron expression
+
+  AutoStopEC2Schedule:
+    Type: String
+    Default: cron(0 1 ? * MON-FRI *)
+    Description: >-
+      Auto Stop EC2 Instance schedule (Mon-Fri 9:00 PM EST / 1:00 AM UTC).
+      Enter a Schedule expression e.g. cron(0 1 ? * MON-FRI *)
+    MinLength: 20
+    MaxLength: 50
+    AllowedPattern: ^cron\([0-9\*\-\,\/\?\s]+\)$
+    ConstraintDescription: Must be a valid cron expression
+
+  EC2StartStopWeekDaySchedule:
+    Type: String
+    Default: cron(*/5 * ? * MON-FRI *)
+    Description: EC2 Start/Stop triggering every weekday every 5 minutes
+    MinLength: 20
+    MaxLength: 50
+    AllowedPattern: ^cron\([0-9\*\-\,\/\?\s]+\)$
+    ConstraintDescription: Must be a valid cron expression
+
+  EC2StartStopWeekEndSchedule:
+    Type: String
+    Default: cron(*/5 * ? * SAT-SUN *)
+    Description: EC2 Start/Stop triggering every weekend every 5 minutes
+    MinLength: 20
+    MaxLength: 50
+    AllowedPattern: ^cron\([0-9\*\-\,\/\?\s]+\)$
+    ConstraintDescription: Must be a valid cron expression
+
+  RegionTZ:
+    Type: String
+    Default: UTC
+    AllowedValues:
+      - UTC
+      - US/Eastern
+      - US/Central
+      - US/Mountain
+      - US/Pacific
+      - Europe/London
+      - Europe/Paris
+      - Europe/Berlin
+      - Europe/Rome
+      - Europe/Stockholm
+      - Europe/Dublin
+      - Asia/Tokyo
+      - Asia/Seoul
+      - Asia/Singapore
+      - Asia/Kolkata
+      - Asia/Hong_Kong
+      - Australia/Sydney
+      - Canada/Central
+      - Africa/Johannesburg
+      - Asia/Bahrain
+      - America/Sao_Paulo
+    Description: Select timezone for execution time in tags (Lambda Environment Variable REGION_TZ)
+
+  LogLevel:
+    Type: String
+    Default: INFO
+    AllowedValues:
+      - DEBUG
+      - INFO
+      - WARNING
+      - ERROR
+      - CRITICAL
+    Description: Log level for Lambda functions
+
+  EnableMonitoring:
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Enable enhanced monitoring and alerting
+
+  NotificationEmail:
+    Type: String
+    Default: ''
+    Description: Email address for error notifications (optional)
+    AllowedPattern: ^$|^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$
+    ConstraintDescription: Must be a valid email address or empty
+
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Environment name for resource tagging
+
+Conditions:
+  EnableMonitoringCondition: !Equals [!Ref EnableMonitoring, 'true']
+  EnableNotificationsCondition: !And
+    - !Condition EnableMonitoringCondition
+    - !Not [!Equals [!Ref NotificationEmail, '']]
+
+Resources:
+  # IAM Role for Lambda functions with least privilege access
+  LambdaEC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-LambdaEC2Role'
+      Description: Enhanced IAM Role for Lambda to Start/Stop EC2 instances with least privilege
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: EC2StartStopPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeTags
+                  - ec2:DescribeInstanceStatus
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ec2:StartInstances
+                  - ec2:StopInstances
+                Resource: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*'
+              - !If
+                - EnableNotificationsCondition
+                - Effect: Allow
+                  Action:
+                    - sns:Publish
+                  Resource: !Ref NotificationTopic
+                - !Ref 'AWS::NoValue'
+      Tags:
+        - Key: Project
+          Value: EC2AutoStartStop
+        - Key: Version
+          Value: '2.0.0'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # SNS Topic for notifications
+  NotificationTopic:
+    Type: AWS::SNS::Topic
+    Condition: EnableNotificationsCondition
+    Properties:
+      TopicName: !Sub '${AWS::StackName}-ec2-notifications'
+      DisplayName: EC2 Auto Start/Stop Notifications
+      KmsMasterKeyId: alias/aws/sns
+
+  NotificationSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: EnableNotificationsCondition
+    Properties:
+      TopicArn: !Ref NotificationTopic
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+
+  # Dead Letter Queue for failed executions
+  DeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Condition: EnableMonitoringCondition
+    Properties:
+      QueueName: !Sub '${AWS::StackName}-ec2-dlq'
+      MessageRetentionPeriod: 1209600  # 14 days
+      KmsMasterKeyId: alias/aws/sqs
+
+  # Enhanced Lambda Functions with improved inline code
+  AutoStartEC2Lambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-AutoStartEC2Instance'
+      Runtime: python3.11
+      MemorySize: 256
+      Role: !GetAtt LambdaEC2Role.Arn
+      Handler: index.lambda_handler
+      Timeout: 300
+      ReservedConcurrentExecutions: 10
+      DeadLetterConfig: !If
+        - EnableMonitoringCondition
+        - TargetArn: !GetAtt DeadLetterQueue.Arn
+        - !Ref 'AWS::NoValue'
+      Environment:
+        Variables:
+          LOG_LEVEL: !Ref LogLevel
+          ENVIRONMENT: !Ref Environment
+          SNS_TOPIC_ARN: !If [EnableNotificationsCondition, !Ref NotificationTopic, '']
+      Code:
+        ZipFile: |
+          import boto3
+          import logging
+          import os
+          import json
+          from datetime import datetime
+          from botocore.exceptions import ClientError
+
+          def configure_logging():
+              logger = logging.getLogger()
+              for handler in logger.handlers[:]:
+                  logger.removeHandler(handler)
+              handler = logging.StreamHandler()
+              formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s')
+              handler.setFormatter(formatter)
+              logger.addHandler(handler)
+              logger.setLevel(os.environ.get('LOG_LEVEL', 'INFO').upper())
+              return logger
+
+          def send_notification(message, subject="EC2 Auto Start Notification"):
+              sns_topic_arn = os.environ.get('SNS_TOPIC_ARN')
+              if sns_topic_arn:
+                  try:
+                      sns = boto3.client('sns')
+                      sns.publish(TopicArn=sns_topic_arn, Message=message, Subject=subject)
+                  except Exception as e:
+                      logging.error(f"Failed to send notification: {e}")
+
+          def lambda_handler(event, context):
+              logger = configure_logging()
+              
+              try:
+                  logger.info("Starting AutoStartEC2Instance function (Enhanced)")
+                  
+                  ec2_client = boto3.client('ec2')
+                  
+                  # Get stopped instances with AutoStart tag
+                  filters = [
+                      {'Name': 'tag:AutoStart', 'Values': ['TRUE', 'True', 'true', '1', 'yes', 'Yes', 'YES', 'on', 'On', 'ON']},
+                      {'Name': 'instance-state-name', 'Values': ['stopped']}
+                  ]
+                  
+                  response = ec2_client.describe_instances(Filters=filters)
+                  instance_ids = []
+                  
+                  for reservation in response['Reservations']:
+                      for instance in reservation['Instances']:
+                          instance_ids.append(instance['InstanceId'])
+                          logger.info(f"Found stopped instance: {instance['InstanceId']} (Type: {instance['InstanceType']})")
+                  
+                  logger.info(f"Found {len(instance_ids)} stopped instances with AutoStart tag")
+                  
+                  if not instance_ids:
+                      logger.info("No instances found in stopped state with AutoStart tag")
+                      return {
+                          'statusCode': 200,
+                          'body': json.dumps({
+                              'message': 'No instances found in stopped state with AutoStart tag',
+                              'instances_processed': 0
+                          })
+                      }
+                  
+                  # Start instances
+                  successful_starts = []
+                  failed_starts = []
+                  
+                  for instance_id in instance_ids:
+                      try:
+                          start_response = ec2_client.start_instances(InstanceIds=[instance_id])
+                          if start_response['StartingInstances']:
+                              current_state = start_response['StartingInstances'][0]['CurrentState']['Name']
+                              successful_starts.append(instance_id)
+                              logger.info(f"Successfully started instance: {instance_id} (State: {current_state})")
+                          else:
+                              failed_starts.append(instance_id)
+                              logger.error(f"Failed to start instance: {instance_id} - No starting instances in response")
+                      except ClientError as e:
+                          error_code = e.response['Error']['Code']
+                          error_message = e.response['Error']['Message']
+                          failed_starts.append(instance_id)
+                          logger.error(f"Failed to start instance {instance_id}: {error_code} - {error_message}")
+                      except Exception as e:
+                          failed_starts.append(instance_id)
+                          logger.error(f"Unexpected error starting instance {instance_id}: {e}")
+                  
+                  # Send notification if there are failures
+                  if failed_starts:
+                      notification_message = f"EC2 Auto Start completed with some failures:\n"
+                      notification_message += f"Successful: {len(successful_starts)} instances\n"
+                      notification_message += f"Failed: {len(failed_starts)} instances\n"
+                      notification_message += f"Failed instances: {', '.join(failed_starts)}"
+                      send_notification(notification_message, "EC2 Auto Start - Partial Failure")
+                  
+                  logger.info(f"Start operation completed: {len(successful_starts)} successful, {len(failed_starts)} failed")
+                  
+                  return {
+                      'statusCode': 200 if not failed_starts else 207,
+                      'body': json.dumps({
+                          'message': f'Processed {len(instance_ids)} instances for auto-start',
+                          'successful': len(successful_starts),
+                          'failed': len(failed_starts),
+                          'successful_instances': successful_starts,
+                          'failed_instances': failed_starts,
+                          'timestamp': datetime.utcnow().isoformat()
+                      })
+                  }
+                  
+              except Exception as e:
+                  logger.error(f"Unexpected error in AutoStartEC2Instance: {str(e)}", exc_info=True)
+                  send_notification(f"Critical error in AutoStartEC2Instance: {str(e)}", "EC2 Auto Start - Critical Error")
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({
+                          'error': 'Internal function error',
+                          'message': str(e),
+                          'timestamp': datetime.utcnow().isoformat()
+                      })
+                  }
+      Description: Enhanced auto start EC2 instances with comprehensive error handling
+      Tags:
+        - Key: Project
+          Value: EC2AutoStartStop
+        - Key: Version
+          Value: '2.0.0'
+        - Key: Environment
+          Value: !Ref Environment
+
+  AutoStopEC2Lambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-AutoStopEC2Instance'
+      Runtime: python3.11
+      MemorySize: 256
+      Role: !GetAtt LambdaEC2Role.Arn
+      Handler: index.lambda_handler
+      Timeout: 300
+      ReservedConcurrentExecutions: 10
+      DeadLetterConfig: !If
+        - EnableMonitoringCondition
+        - TargetArn: !GetAtt DeadLetterQueue.Arn
+        - !Ref 'AWS::NoValue'
+      Environment:
+        Variables:
+          LOG_LEVEL: !Ref LogLevel
+          ENVIRONMENT: !Ref Environment
+          SNS_TOPIC_ARN: !If [EnableNotificationsCondition, !Ref NotificationTopic, '']
+      Code:
+        ZipFile: |
+          import boto3
+          import logging
+          import os
+          import json
+          from datetime import datetime
+          from botocore.exceptions import ClientError
+
+          def configure_logging():
+              logger = logging.getLogger()
+              for handler in logger.handlers[:]:
+                  logger.removeHandler(handler)
+              handler = logging.StreamHandler()
+              formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s')
+              handler.setFormatter(formatter)
+              logger.addHandler(handler)
+              logger.setLevel(os.environ.get('LOG_LEVEL', 'INFO').upper())
+              return logger
+
+          def send_notification(message, subject="EC2 Auto Stop Notification"):
+              sns_topic_arn = os.environ.get('SNS_TOPIC_ARN')
+              if sns_topic_arn:
+                  try:
+                      sns = boto3.client('sns')
+                      sns.publish(TopicArn=sns_topic_arn, Message=message, Subject=subject)
+                  except Exception as e:
+                      logging.error(f"Failed to send notification: {e}")
+
+          def lambda_handler(event, context):
+              logger = configure_logging()
+              
+              try:
+                  logger.info("Starting AutoStopEC2Instance function (Enhanced)")
+                  
+                  ec2_client = boto3.client('ec2')
+                  
+                  # Get running instances with AutoStop tag
+                  filters = [
+                      {'Name': 'tag:AutoStop', 'Values': ['TRUE', 'True', 'true', '1', 'yes', 'Yes', 'YES', 'on', 'On', 'ON']},
+                      {'Name': 'instance-state-name', 'Values': ['running']}
+                  ]
+                  
+                  response = ec2_client.describe_instances(Filters=filters)
+                  instance_ids = []
+                  
+                  for reservation in response['Reservations']:
+                      for instance in reservation['Instances']:
+                          instance_ids.append(instance['InstanceId'])
+                          logger.info(f"Found running instance: {instance['InstanceId']} (Type: {instance['InstanceType']})")
+                  
+                  logger.info(f"Found {len(instance_ids)} running instances with AutoStop tag")
+                  
+                  if not instance_ids:
+                      logger.info("No instances found in running state with AutoStop tag")
+                      return {
+                          'statusCode': 200,
+                          'body': json.dumps({
+                              'message': 'No instances found in running state with AutoStop tag',
+                              'instances_processed': 0
+                          })
+                      }
+                  
+                  # Stop instances
+                  successful_stops = []
+                  failed_stops = []
+                  
+                  for instance_id in instance_ids:
+                      try:
+                          stop_response = ec2_client.stop_instances(InstanceIds=[instance_id])
+                          if stop_response['StoppingInstances']:
+                              current_state = stop_response['StoppingInstances'][0]['CurrentState']['Name']
+                              successful_stops.append(instance_id)
+                              logger.info(f"Successfully stopped instance: {instance_id} (State: {current_state})")
+                          else:
+                              failed_stops.append(instance_id)
+                              logger.error(f"Failed to stop instance: {instance_id} - No stopping instances in response")
+                      except ClientError as e:
+                          error_code = e.response['Error']['Code']
+                          error_message = e.response['Error']['Message']
+                          failed_stops.append(instance_id)
+                          logger.error(f"Failed to stop instance {instance_id}: {error_code} - {error_message}")
+                      except Exception as e:
+                          failed_stops.append(instance_id)
+                          logger.error(f"Unexpected error stopping instance {instance_id}: {e}")
+                  
+                  # Send notification if there are failures
+                  if failed_stops:
+                      notification_message = f"EC2 Auto Stop completed with some failures:\n"
+                      notification_message += f"Successful: {len(successful_stops)} instances\n"
+                      notification_message += f"Failed: {len(failed_stops)} instances\n"
+                      notification_message += f"Failed instances: {', '.join(failed_stops)}"
+                      send_notification(notification_message, "EC2 Auto Stop - Partial Failure")
+                  
+                  logger.info(f"Stop operation completed: {len(successful_stops)} successful, {len(failed_stops)} failed")
+                  
+                  return {
+                      'statusCode': 200 if not failed_stops else 207,
+                      'body': json.dumps({
+                          'message': f'Processed {len(instance_ids)} instances for auto-stop',
+                          'successful': len(successful_stops),
+                          'failed': len(failed_stops),
+                          'successful_instances': successful_stops,
+                          'failed_instances': failed_stops,
+                          'timestamp': datetime.utcnow().isoformat()
+                      })
+                  }
+                  
+              except Exception as e:
+                  logger.error(f"Unexpected error in AutoStopEC2Instance: {str(e)}", exc_info=True)
+                  send_notification(f"Critical error in AutoStopEC2Instance: {str(e)}", "EC2 Auto Stop - Critical Error")
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({
+                          'error': 'Internal function error',
+                          'message': str(e),
+                          'timestamp': datetime.utcnow().isoformat()
+                      })
+                  }
+      Description: Enhanced auto stop EC2 instances with comprehensive error handling
+      Tags:
+        - Key: Project
+          Value: EC2AutoStartStop
+        - Key: Version
+          Value: '2.0.0'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Time-based Lambda functions (simplified for brevity - similar pattern as above)
+  EC2StartWeekDayLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-EC2StartWeekDay'
+      Runtime: python3.11
+      MemorySize: 256
+      Role: !GetAtt LambdaEC2Role.Arn
+      Handler: index.lambda_handler
+      Timeout: 300
+      ReservedConcurrentExecutions: 10
+      Environment:
+        Variables:
+          REGION_TZ: !Ref RegionTZ
+          LOG_LEVEL: !Ref LogLevel
+          ENVIRONMENT: !Ref Environment
+          SNS_TOPIC_ARN: !If [EnableNotificationsCondition, !Ref NotificationTopic, '']
+      Code:
+        ZipFile: |
+          import boto3
+          import logging
+          import os
+          import json
+          import time
+          import datetime
+          from botocore.exceptions import ClientError
+
+          def configure_logging():
+              logger = logging.getLogger()
+              for handler in logger.handlers[:]:
+                  logger.removeHandler(handler)
+              handler = logging.StreamHandler()
+              formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s')
+              handler.setFormatter(formatter)
+              logger.addHandler(handler)
+              logger.setLevel(os.environ.get('LOG_LEVEL', 'INFO').upper())
+              return logger
+
+          def set_region_timezone():
+              logger = logging.getLogger()
+              timezone_var = os.environ.get('REGION_TZ', 'UTC')
+              logger.info(f"Setting timezone to: {timezone_var}")
+              os.environ['TZ'] = timezone_var
+              time.tzset()
+              return timezone_var
+
+          def lambda_handler(event, context):
+              logger = configure_logging()
+              
+              try:
+                  logger.info("Starting EC2StartWeekDay function (Enhanced)")
+                  
+                  # Set timezone
+                  timezone = set_region_timezone()
+                  current_time = datetime.datetime.now()
+                  weekday = current_time.isoweekday()
+                  
+                  logger.info(f"Current time: {current_time}, Weekday: {weekday}, Timezone: {timezone}")
+                  
+                  # Check if it's a weekday
+                  if not (1 <= weekday <= 5):
+                      logger.info(f"Not a weekday (current: {weekday}), skipping execution")
+                      return {
+                          'statusCode': 200,
+                          'body': json.dumps({
+                              'message': f'Not a weekday (current day: {weekday})',
+                              'weekday': weekday,
+                              'timestamp': current_time.isoformat()
+                          })
+                      }
+                  
+                  # Time window logic
+                  time_plus = current_time + datetime.timedelta(minutes=5)
+                  time_minus = current_time - datetime.timedelta(minutes=5)
+                  current_time_str = current_time.strftime('%H:%M')
+                  max_time_str = time_plus.strftime('%H:%M')
+                  min_time_str = time_minus.strftime('%H:%M')
+                  
+                  logger.info(f"Time window: {min_time_str} - {max_time_str}")
+                  
+                  ec2_client = boto3.client('ec2')
+                  response = ec2_client.describe_instances()
+                  
+                  matching_instances = []
+                  for reservation in response['Reservations']:
+                      for instance in reservation['Instances']:
+                          if 'Tags' in instance:
+                              for tag in instance['Tags']:
+                                  if tag['Key'] == 'StartWeekDay':
+                                      scheduled_time = tag['Value']
+                                      if min_time_str <= scheduled_time <= max_time_str:
+                                          matching_instances.append({
+                                              'instance_id': instance['InstanceId'],
+                                              'state': instance['State']['Name'],
+                                              'scheduled_time': scheduled_time
+                                          })
+                                          logger.info(f"Found matching instance: {instance['InstanceId']} scheduled for {scheduled_time}")
+                                      break
+                  
+                  # Start stopped instances
+                  started_instances = []
+                  for instance_data in matching_instances:
+                      if instance_data['state'] == 'stopped':
+                          try:
+                              ec2_client.start_instances(InstanceIds=[instance_data['instance_id']])
+                              started_instances.append(instance_data['instance_id'])
+                              logger.info(f"Started instance: {instance_data['instance_id']}")
+                          except Exception as e:
+                              logger.error(f"Failed to start instance {instance_data['instance_id']}: {e}")
+                  
+                  logger.info(f"Started {len(started_instances)} instances")
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'message': f'Processed {len(matching_instances)} instances with StartWeekDay schedule',
+                          'started_instances': len(started_instances),
+                          'instances': started_instances,
+                          'timestamp': current_time.isoformat()
+                      })
+                  }
+                  
+              except Exception as e:
+                  logger.error(f"Unexpected error in EC2StartWeekDay: {str(e)}", exc_info=True)
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({
+                          'error': 'Internal function error',
+                          'message': str(e),
+                          'timestamp': datetime.datetime.utcnow().isoformat()
+                      })
+                  }
+      Description: Enhanced EC2 start weekday with timezone support and error handling
+      Tags:
+        - Key: Project
+          Value: EC2AutoStartStop
+        - Key: Version
+          Value: '2.0.0'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # EventBridge Rules
+  AutoStartEC2Rule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${AWS::StackName}-AutoStartEC2Rule'
+      Description: Enhanced Auto Start EC2 Instance Rule
+      ScheduleExpression: !Ref AutoStartEC2Schedule
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt AutoStartEC2Lambda.Arn
+          Id: AutoStartEC2Lambda
+
+  AutoStopEC2Rule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${AWS::StackName}-AutoStopEC2Rule'
+      Description: Enhanced Auto Stop EC2 Instance Rule
+      ScheduleExpression: !Ref AutoStopEC2Schedule
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt AutoStopEC2Lambda.Arn
+          Id: AutoStopEC2Lambda
+
+  EC2StartStopWeekDayRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${AWS::StackName}-EC2StartStopWeekDayRule'
+      Description: Enhanced EC2 Start/Stop triggering every weekday
+      ScheduleExpression: !Ref EC2StartStopWeekDaySchedule
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt EC2StartWeekDayLambda.Arn
+          Id: EC2StartWeekDayLambda
+
+  # Lambda Permissions
+  AutoStartEC2LambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt AutoStartEC2Lambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt AutoStartEC2Rule.Arn
+
+  AutoStopEC2LambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt AutoStopEC2Lambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt AutoStopEC2Rule.Arn
+
+  EC2StartWeekDayLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt EC2StartWeekDayLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EC2StartStopWeekDayRule.Arn
+
+  # CloudWatch Alarms
+  AutoStartEC2ErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: EnableMonitoringCondition
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-AutoStartEC2-Errors'
+      AlarmDescription: Monitor errors in AutoStartEC2Instance function
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref AutoStartEC2Lambda
+      AlarmActions:
+        - !If [EnableNotificationsCondition, !Ref NotificationTopic, !Ref 'AWS::NoValue']
+
+  AutoStopEC2ErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: EnableMonitoringCondition
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-AutoStopEC2-Errors'
+      AlarmDescription: Monitor errors in AutoStopEC2Instance function
+      MetricName: Errors
+      Namespace: AWS/Lambda

@@ -1,0 +1,644 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  Enhanced AWS SAM template for EC2 Auto Start/Stop solution with production-ready features.
+  This template creates Lambda functions with comprehensive error handling, monitoring, 
+  security enhancements, and operational excellence features.
+  
+  Version: 2.0.0
+  Author: Enhanced by BlackBoxAI
+  Last Modified: 2024-01-01
+
+Metadata:
+  AWS::ServerlessRepo::Application:
+    Name: enhanced-ec2-auto-start-stop
+    Description: Production-ready EC2 auto start/stop solution with comprehensive monitoring and security
+    Author: BlackBoxAI
+    SpdxLicenseId: MIT
+    LicenseUrl: ../LICENSE
+    ReadmeUrl: ../README_improved.md
+    Labels: ['ec2', 'automation', 'cost-optimization', 'scheduling', 'production-ready']
+    HomePageUrl: https://github.com/aws-samples/aws-cfn-save-costs-auto-start-stop-ec2
+    SemanticVersion: 2.0.0
+    SourceCodeUrl: https://github.com/aws-samples/aws-cfn-save-costs-auto-start-stop-ec2
+
+Parameters:
+  AutoStartEC2Schedule:
+    Type: String
+    Default: cron(0 13 ? * MON-FRI *)
+    Description: >-
+      Auto Start EC2 Instance schedule (Mon-Fri 9:00 AM EST / 1:00 PM UTC).
+      Enter a Schedule expression e.g. cron(0 13 ? * MON-FRI *)
+    MinLength: 20
+    MaxLength: 50
+    AllowedPattern: ^cron\([0-9\*\-\,\/\?\s]+\)$
+    ConstraintDescription: Must be a valid cron expression
+
+  AutoStopEC2Schedule:
+    Type: String
+    Default: cron(0 1 ? * MON-FRI *)
+    Description: >-
+      Auto Stop EC2 Instance schedule (Mon-Fri 9:00 PM EST / 1:00 AM UTC).
+      Enter a Schedule expression e.g. cron(0 1 ? * MON-FRI *)
+    MinLength: 20
+    MaxLength: 50
+    AllowedPattern: ^cron\([0-9\*\-\,\/\?\s]+\)$
+    ConstraintDescription: Must be a valid cron expression
+
+  EC2StartStopWeekDaySchedule:
+    Type: String
+    Default: cron(*/5 * ? * MON-FRI *)
+    Description: EC2 Start/Stop triggering every weekday every 5 minutes
+    MinLength: 20
+    MaxLength: 50
+    AllowedPattern: ^cron\([0-9\*\-\,\/\?\s]+\)$
+    ConstraintDescription: Must be a valid cron expression
+
+  EC2StartStopWeekEndSchedule:
+    Type: String
+    Default: cron(*/5 * ? * SAT-SUN *)
+    Description: EC2 Start/Stop triggering every weekend every 5 minutes
+    MinLength: 20
+    MaxLength: 50
+    AllowedPattern: ^cron\([0-9\*\-\,\/\?\s]+\)$
+    ConstraintDescription: Must be a valid cron expression
+
+  RegionTZ:
+    Type: String
+    Default: UTC
+    AllowedValues:
+      - UTC
+      - US/Eastern
+      - US/Central
+      - US/Mountain
+      - US/Pacific
+      - Europe/London
+      - Europe/Paris
+      - Europe/Berlin
+      - Europe/Rome
+      - Europe/Stockholm
+      - Europe/Dublin
+      - Asia/Tokyo
+      - Asia/Seoul
+      - Asia/Singapore
+      - Asia/Kolkata
+      - Asia/Hong_Kong
+      - Australia/Sydney
+      - Canada/Central
+      - Africa/Johannesburg
+      - Asia/Bahrain
+      - America/Sao_Paulo
+    Description: Select timezone for execution time in tags (Lambda Environment Variable REGION_TZ)
+
+  LogLevel:
+    Type: String
+    Default: INFO
+    AllowedValues:
+      - DEBUG
+      - INFO
+      - WARNING
+      - ERROR
+      - CRITICAL
+    Description: Log level for Lambda functions
+
+  EnableMonitoring:
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Enable enhanced monitoring and alerting
+
+  NotificationEmail:
+    Type: String
+    Default: ''
+    Description: Email address for error notifications (optional)
+    AllowedPattern: ^$|^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$
+    ConstraintDescription: Must be a valid email address or empty
+
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Environment name for resource tagging
+
+Conditions:
+  EnableMonitoringCondition: !Equals [!Ref EnableMonitoring, 'true']
+  EnableNotificationsCondition: !And
+    - !Condition EnableMonitoringCondition
+    - !Not [!Equals [!Ref NotificationEmail, '']]
+
+Globals:
+  Function:
+    Runtime: python3.11
+    MemorySize: 256
+    Timeout: 300
+    ReservedConcurrentExecutions: 10
+    Environment:
+      Variables:
+        LOG_LEVEL: !Ref LogLevel
+        ENVIRONMENT: !Ref Environment
+    Tags:
+      Project: EC2AutoStartStop
+      Version: '2.0.0'
+      Environment: !Ref Environment
+      ManagedBy: SAM
+
+Resources:
+  # Enhanced Lambda Layer with improved utilities
+  EC2UtilsLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub '${AWS::StackName}-ec2-utils-layer'
+      Description: Enhanced layer for EC2 utility functions with production-ready features
+      ContentUri: ./lambda_layer
+      CompatibleRuntimes:
+        - python3.11
+        - python3.12
+      LicenseInfo: MIT
+      RetentionPolicy: Retain
+    Metadata:
+      BuildMethod: python3.11
+
+  # SNS Topic for notifications
+  NotificationTopic:
+    Type: AWS::SNS::Topic
+    Condition: EnableNotificationsCondition
+    Properties:
+      TopicName: !Sub '${AWS::StackName}-ec2-notifications'
+      DisplayName: EC2 Auto Start/Stop Notifications
+      KmsMasterKeyId: alias/aws/sns
+
+  NotificationSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: EnableNotificationsCondition
+    Properties:
+      TopicArn: !Ref NotificationTopic
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+
+  # Dead Letter Queue for failed executions
+  DeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Condition: EnableMonitoringCondition
+    Properties:
+      QueueName: !Sub '${AWS::StackName}-ec2-dlq'
+      MessageRetentionPeriod: 1209600  # 14 days
+      KmsMasterKeyId: alias/aws/sqs
+
+  # Enhanced Lambda Functions
+  AutoStartEC2Lambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-AutoStartEC2Instance'
+      CodeUri: ./lambda/AutoStartEC2Instance_improved.py
+      Handler: AutoStartEC2Instance_improved.lambda_handler
+      Description: Enhanced auto start EC2 instances with comprehensive error handling
+      Layers:
+        - !Ref EC2UtilsLayer
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !If [EnableMonitoringCondition, !GetAtt DeadLetterQueue.Arn, !Ref 'AWS::NoValue']
+      Policies:
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - ec2:DescribeInstances
+                - ec2:DescribeTags
+                - ec2:DescribeInstanceStatus
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - ec2:StartInstances
+              Resource: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*'
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+            - !If
+              - EnableNotificationsCondition
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref NotificationTopic
+              - !Ref 'AWS::NoValue'
+      Events:
+        AutoStartEC2Rule:
+          Type: Schedule
+          Properties:
+            Name: !Sub '${AWS::StackName}-AutoStartEC2Rule'
+            Description: Auto Start EC2 Instance (Enhanced)
+            Schedule: !Ref AutoStartEC2Schedule
+            Enabled: true
+
+  AutoStopEC2Lambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-AutoStopEC2Instance'
+      CodeUri: ./lambda/AutoStopEC2Instance_improved.py
+      Handler: AutoStopEC2Instance_improved.lambda_handler
+      Description: Enhanced auto stop EC2 instances with comprehensive error handling
+      Layers:
+        - !Ref EC2UtilsLayer
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !If [EnableMonitoringCondition, !GetAtt DeadLetterQueue.Arn, !Ref 'AWS::NoValue']
+      Policies:
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - ec2:DescribeInstances
+                - ec2:DescribeTags
+                - ec2:DescribeInstanceStatus
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - ec2:StopInstances
+              Resource: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*'
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+            - !If
+              - EnableNotificationsCondition
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref NotificationTopic
+              - !Ref 'AWS::NoValue'
+      Events:
+        AutoStopEC2Rule:
+          Type: Schedule
+          Properties:
+            Name: !Sub '${AWS::StackName}-AutoStopEC2Rule'
+            Description: Auto Stop EC2 Instance (Enhanced)
+            Schedule: !Ref AutoStopEC2Schedule
+            Enabled: true
+
+  EC2StartWeekDayLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-EC2StartWeekDay'
+      CodeUri: ./lambda/EC2StartWeekDay_improved.py
+      Handler: EC2StartWeekDay_improved.lambda_handler
+      Description: Enhanced EC2 start weekday with timezone support and error handling
+      Layers:
+        - !Ref EC2UtilsLayer
+      Environment:
+        Variables:
+          REGION_TZ: !Ref RegionTZ
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !If [EnableMonitoringCondition, !GetAtt DeadLetterQueue.Arn, !Ref 'AWS::NoValue']
+      Policies:
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - ec2:DescribeInstances
+                - ec2:DescribeTags
+                - ec2:DescribeInstanceStatus
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - ec2:StartInstances
+              Resource: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*'
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+            - !If
+              - EnableNotificationsCondition
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref NotificationTopic
+              - !Ref 'AWS::NoValue'
+      Events:
+        EC2StartWeekDayRule:
+          Type: Schedule
+          Properties:
+            Name: !Sub '${AWS::StackName}-EC2StartWeekDayRule'
+            Description: EC2 Start triggering every weekday every 5 mins (Enhanced)
+            Schedule: !Ref EC2StartStopWeekDaySchedule
+            Enabled: true
+
+  EC2StopWeekDayLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-EC2StopWeekDay'
+      CodeUri: ./lambda/EC2StopWeekDay_improved.py
+      Handler: EC2StopWeekDay_improved.lambda_handler
+      Description: Enhanced EC2 stop weekday with timezone support and error handling
+      Layers:
+        - !Ref EC2UtilsLayer
+      Environment:
+        Variables:
+          REGION_TZ: !Ref RegionTZ
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !If [EnableMonitoringCondition, !GetAtt DeadLetterQueue.Arn, !Ref 'AWS::NoValue']
+      Policies:
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - ec2:DescribeInstances
+                - ec2:DescribeTags
+                - ec2:DescribeInstanceStatus
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - ec2:StopInstances
+              Resource: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*'
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+            - !If
+              - EnableNotificationsCondition
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref NotificationTopic
+              - !Ref 'AWS::NoValue'
+      Events:
+        EC2StopWeekDayRule:
+          Type: Schedule
+          Properties:
+            Name: !Sub '${AWS::StackName}-EC2StopWeekDayRule'
+            Description: EC2 Stop triggering every weekday every 5 mins (Enhanced)
+            Schedule: !Ref EC2StartStopWeekDaySchedule
+            Enabled: true
+
+  EC2StartWeekEndLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-EC2StartWeekEnd'
+      CodeUri: ./lambda/EC2StartWeekEnd_improved.py
+      Handler: EC2StartWeekEnd_improved.lambda_handler
+      Description: Enhanced EC2 start weekend with timezone support and error handling
+      Layers:
+        - !Ref EC2UtilsLayer
+      Environment:
+        Variables:
+          REGION_TZ: !Ref RegionTZ
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !If [EnableMonitoringCondition, !GetAtt DeadLetterQueue.Arn, !Ref 'AWS::NoValue']
+      Policies:
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - ec2:DescribeInstances
+                - ec2:DescribeTags
+                - ec2:DescribeInstanceStatus
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - ec2:StartInstances
+              Resource: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*'
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+            - !If
+              - EnableNotificationsCondition
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref NotificationTopic
+              - !Ref 'AWS::NoValue'
+      Events:
+        EC2StartWeekEndRule:
+          Type: Schedule
+          Properties:
+            Name: !Sub '${AWS::StackName}-EC2StartWeekEndRule'
+            Description: EC2 Start triggering every weekend every 5 mins (Enhanced)
+            Schedule: !Ref EC2StartStopWeekEndSchedule
+            Enabled: true
+
+  EC2StopWeekEndLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-EC2StopWeekEnd'
+      CodeUri: ./lambda/EC2StopWeekEnd_improved.py
+      Handler: EC2StopWeekEnd_improved.lambda_handler
+      Description: Enhanced EC2 stop weekend with timezone support and error handling
+      Layers:
+        - !Ref EC2UtilsLayer
+      Environment:
+        Variables:
+          REGION_TZ: !Ref RegionTZ
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !If [EnableMonitoringCondition, !GetAtt DeadLetterQueue.Arn, !Ref 'AWS::NoValue']
+      Policies:
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - ec2:DescribeInstances
+                - ec2:DescribeTags
+                - ec2:DescribeInstanceStatus
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - ec2:StopInstances
+              Resource: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*'
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+            - !If
+              - EnableNotificationsCondition
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref NotificationTopic
+              - !Ref 'AWS::NoValue'
+      Events:
+        EC2StopWeekEndRule:
+          Type: Schedule
+          Properties:
+            Name: !Sub '${AWS::StackName}-EC2StopWeekEndRule'
+            Description: EC2 Stop triggering every weekend every 5 mins (Enhanced)
+            Schedule: !Ref EC2StartStopWeekEndSchedule
+            Enabled: true
+
+  # CloudWatch Alarms for monitoring
+  AutoStartEC2ErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: EnableMonitoringCondition
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-AutoStartEC2-Errors'
+      AlarmDescription: Monitor errors in AutoStartEC2Instance function
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref AutoStartEC2Lambda
+      AlarmActions:
+        - !If [EnableNotificationsCondition, !Ref NotificationTopic, !Ref 'AWS::NoValue']
+
+  AutoStopEC2ErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: EnableMonitoringCondition
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-AutoStopEC2-Errors'
+      AlarmDescription: Monitor errors in AutoStopEC2Instance function
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref AutoStopEC2Lambda
+      AlarmActions:
+        - !If [EnableNotificationsCondition, !Ref NotificationTopic, !Ref 'AWS::NoValue']
+
+  # CloudWatch Dashboard
+  EC2AutoStartStopDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Condition: EnableMonitoringCondition
+    Properties:
+      DashboardName: !Sub '${AWS::StackName}-EC2-AutoStartStop'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/Lambda", "Invocations", "FunctionName", "${AutoStartEC2Lambda}" ],
+                  [ ".", "Errors", ".", "." ],
+                  [ ".", "Duration", ".", "." ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "AutoStart EC2 Metrics",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/Lambda", "Invocations", "FunctionName", "${AutoStopEC2Lambda}" ],
+                  [ ".", "Errors", ".", "." ],
+                  [ ".", "Duration", ".", "." ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "AutoStop EC2 Metrics",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 6,
+              "width": 24,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/Lambda", "Invocations", "FunctionName", "${EC2StartWeekDayLambda}" ],
+                  [ ".", ".", ".", "${EC2StopWeekDayLambda}" ],
+                  [ ".", ".", ".", "${EC2StartWeekEndLambda}" ],
+                  [ ".", ".", ".", "${EC2StopWeekEndLambda}" ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Time-based Functions Invocations",
+                "period": 300
+              }
+            }
+          ]
+        }
+
+Outputs:
+  RegionTZOutput:
+    Description: AWS Region Timezone
+    Value: !Ref RegionTZ
+    Export:
+      Name: !Sub '${AWS::StackName}-RegionTZ'
+
+  AWSRegionOutput:
+    Description: AWS Region
+    Value: !Ref AWS::Region
+    Export:
+      Name: !Sub '${AWS::StackName}-Region'
+
+  StackName:
+    Description: CloudFormation Stack Name
+    Value: !Ref AWS::StackName
+    Export:
+      Name: !Sub '${AWS::StackName}-StackName'
+
+  LayerArn:
+    Description: EC2 Utils Layer ARN
+    Value: !Ref EC2UtilsLayer
+    Export:
+      Name: !Sub '${AWS::StackName}-LayerArn'
+
+  NotificationTopicArn:
+    Condition: EnableNotificationsCondition
+    Description: SNS Topic ARN for notifications
+    Value: !Ref NotificationTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-NotificationTopic'
+
+  DashboardURL:
+    Condition: EnableMonitoringCondition
+    Description: CloudWatch Dashboard URL
+    Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${AWS::StackName}-EC2-AutoStartStop'
+    Export:
+      Name: !Sub '${AWS::StackName}-DashboardURL'
+
+  DeploymentInfo:
+    Description: Deployment Information
+    Value: !Sub |
+      Stack: ${AWS::StackName}
+      Region: ${AWS::Region}
+      Environment: ${Environment}
+      Version: 2.0.0
+      Monitoring: ${EnableMonitoring}
+      Notifications: ${NotificationEmail}

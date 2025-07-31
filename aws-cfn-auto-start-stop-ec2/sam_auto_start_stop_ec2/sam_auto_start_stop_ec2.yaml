@@ -59,15 +59,28 @@ Parameters:
 
 Resources:
 
+  EC2UtilsLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: ec2-utils-layer
+      Description: Layer for common EC2 utility functions.
+      ContentUri: ./lambda_layer
+      CompatibleRuntimes:
+        - python3.12
+      LicenseInfo: "MIT"
+      RetentionPolicy: Retain
+
   AutoStartEC2Lambda:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: AutoStartEC2Instance
-      Runtime: python3.9
+      Runtime: python3.12
       MemorySize: 128
       Handler: AutoStartEC2Instance.lambda_handler
       Timeout: 60
       ReservedConcurrentExecutions: 10
+      Layers:
+        - !Ref EC2UtilsLayer
       Policies:
         - AWSLambdaBasicExecutionRole
         - Version: 2012-10-17
@@ -99,11 +112,13 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: AutoStopEC2Instance
-      Runtime: python3.9
+      Runtime: python3.12
       MemorySize: 128
       Handler: AutoStopEC2Instance.lambda_handler
       Timeout: 60
       ReservedConcurrentExecutions: 10
+      Layers:
+        - !Ref EC2UtilsLayer
       Policies:
         - AWSLambdaBasicExecutionRole
         - Version: 2012-10-17
@@ -135,11 +150,13 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: EC2StopWeekDay
-      Runtime: python3.9
+      Runtime: python3.12
       MemorySize: 128
       Handler: EC2StopWeekDay.lambda_handler
       Timeout: 60
       ReservedConcurrentExecutions: 10
+      Layers:
+        - !Ref EC2UtilsLayer
       Environment:
           Variables:
             REGION_TZ:
@@ -175,11 +192,13 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: EC2StartWeekDay
-      Runtime: python3.9
+      Runtime: python3.12
       MemorySize: 128
       Handler: EC2StartWeekDay.lambda_handler
       Timeout: 60
       ReservedConcurrentExecutions: 10
+      Layers:
+        - !Ref EC2UtilsLayer
       Environment:
           Variables:
             REGION_TZ:
@@ -215,11 +234,13 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: EC2StopWeekEnd
-      Runtime: python3.9
+      Runtime: python3.12
       MemorySize: 128
       Handler: EC2StopWeekEnd.lambda_handler
       Timeout: 60
       ReservedConcurrentExecutions: 10
+      Layers:
+        - !Ref EC2UtilsLayer
       Environment:
           Variables:
             REGION_TZ:
@@ -255,11 +276,13 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: EC2StartWeekEnd
-      Runtime: python3.9
+      Runtime: python3.12
       MemorySize: 128
       Handler: EC2StartWeekEnd.lambda_handler
       Timeout: 60
       ReservedConcurrentExecutions: 10
+      Layers:
+        - !Ref EC2UtilsLayer
       Environment:
           Variables:
             REGION_TZ:

@@ -1,0 +1,479 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  Improved AWS SAM template for RDS Auto Start-Stop solution.
+  Enhanced with better security, error handling, monitoring, and maintainability.
+  Features shared Lambda layer, improved IAM policies, and comprehensive logging.
+  Version: 2.0.0 - Improved by AI Assistant
+
+Metadata:
+  AWS::ServerlessRepo::Application:
+    Name: rds-auto-start-stop-improved
+    Description: Improved solution to automatically start and stop RDS instances to save costs
+    Author: AWS Samples (Improved by AI Assistant)
+    SpdxLicenseId: MIT-0
+    LicenseUrl: ../LICENSE
+    ReadmeUrl: ../README.md
+    Labels: ['rds', 'cost-optimization', 'automation', 'lambda', 'eventbridge']
+    HomePageUrl: https://github.com/aws-samples/aws-cfn-save-costs-auto-start-stop-rds
+    SemanticVersion: 2.0.0
+    SourceCodeUrl: https://github.com/aws-samples/aws-cfn-save-costs-auto-start-stop-rds
+
+Parameters:
+  AutoStartRDSSchedule:
+    Type: String
+    Default: cron(0 13 ? * MON-FRI *)
+    Description: Auto Start RDS Instance (Mon-Fri 9:00 AM EST / 1:00 PM GMT)
+    MinLength: 20
+    MaxLength: 50
+    AllowedPattern: ^cron\([0-9\*\-\,\/\?\s]+\)$
+    ConstraintDescription: Must be a valid cron expression
+
+  AutoStopRDSSchedule:
+    Type: String
+    Default: cron(0 1 ? * MON-FRI *)
+    Description: Auto Stop RDS Instance (Mon-Fri 9:00 PM EST / 1:00 AM GMT)
+    MinLength: 20
+    MaxLength: 50
+    AllowedPattern: ^cron\([0-9\*\-\,\/\?\s]+\)$
+    ConstraintDescription: Must be a valid cron expression
+
+  RDSStartStopWeekDaySchedule:
+    Type: String
+    Default: cron(*/5 * ? * MON-FRI *)
+    Description: RDS Start Stop triggering every Week Day every 5 mins
+    MinLength: 20
+    MaxLength: 50
+    AllowedPattern: ^cron\([0-9\*\-\,\/\?\s]+\)$
+    ConstraintDescription: Must be a valid cron expression
+
+  RDSStartStopWeekEndSchedule:
+    Type: String
+    Default: cron(*/5 * ? * SAT-SUN *)
+    Description: RDS Start Stop triggering every Week End every 5 mins
+    MinLength: 20
+    MaxLength: 50
+    AllowedPattern: ^cron\([0-9\*\-\,\/\?\s]+\)$
+    ConstraintDescription: Must be a valid cron expression
+
+  RegionTZ:
+    Type: String
+    Default: UTC
+    AllowedValues:
+      - UTC
+      - US/Eastern
+      - US/Central
+      - US/Mountain
+      - US/Pacific
+      - US/Alaska
+      - US/Hawaii
+      - Canada/Atlantic
+      - Canada/Central
+      - Canada/Eastern
+      - Canada/Mountain
+      - Canada/Pacific
+      - Europe/London
+      - Europe/Dublin
+      - Europe/Paris
+      - Europe/Berlin
+      - Europe/Rome
+      - Europe/Stockholm
+      - Europe/Amsterdam
+      - Asia/Tokyo
+      - Asia/Seoul
+      - Asia/Singapore
+      - Asia/Hong_Kong
+      - Asia/Kolkata
+      - Asia/Dubai
+      - Asia/Bahrain
+      - Australia/Sydney
+      - Australia/Melbourne
+      - Africa/Johannesburg
+      - America/Sao_Paulo
+      - America/Argentina/Buenos_Aires
+    Description: Select Timezone for execution time in Tags
+
+  LogLevel:
+    Type: String
+    Default: INFO
+    AllowedValues: [DEBUG, INFO, WARNING, ERROR, CRITICAL]
+    Description: Log level for Lambda functions
+
+  EnableDetailedMonitoring:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Enable detailed CloudWatch monitoring and alarms
+
+  NotificationEmail:
+    Type: String
+    Default: ''
+    Description: Email address for error notifications (optional)
+    AllowedPattern: ^$|^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$
+    ConstraintDescription: Must be a valid email address or empty
+
+Conditions:
+  EnableNotifications: !Not [!Equals [!Ref NotificationEmail, '']]
+  EnableMonitoring: !Equals [!Ref EnableDetailedMonitoring, 'true']
+
+Globals:
+  Function:
+    Runtime: python3.11
+    MemorySize: 256
+    Timeout: 300
+    ReservedConcurrentExecutions: 5
+    Environment:
+      Variables:
+        LOG_LEVEL: !Ref LogLevel
+        POWERTOOLS_SERVICE_NAME: rds-auto-start-stop
+        POWERTOOLS_METRICS_NAMESPACE: RDS/AutoStartStop
+    Layers:
+      - !Ref RDSUtilsLayer
+    Tags:
+      Project: RDS-Auto-Start-Stop
+      Version: "2.0.0"
+      Environment: !Ref AWS::StackName
+
+Resources:
+  # Lambda Layer for shared utilities
+  RDSUtilsLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub "${AWS::StackName}-rds-utils"
+      Description: Shared utilities for RDS auto start/stop functions
+      ContentUri: lambda_layer/
+      CompatibleRuntimes:
+        - python3.11
+        - python3.10
+        - python3.9
+      RetentionPolicy: Delete
+    Metadata:
+      BuildMethod: python3.11
+
+  # Enhanced IAM Role with least privilege
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-lambda-execution-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: RDSStartStopPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - rds:DescribeDBInstances
+                  - rds:DescribeDBClusters
+                  - rds:ListTagsForResource
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - rds:StartDBInstance
+                  - rds:StopDBInstance
+                  - rds:StartDBCluster
+                  - rds:StopDBCluster
+                Resource:
+                  - !Sub 'arn:aws:rds:${AWS::Region}:${AWS::AccountId}:db:*'
+                  - !Sub 'arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster:*'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+              - !If
+                - EnableMonitoring
+                - Effect: Allow
+                  Action:
+                    - cloudwatch:PutMetricData
+                  Resource: '*'
+                - !Ref AWS::NoValue
+
+  # SNS Topic for notifications
+  ErrorNotificationTopic:
+    Type: AWS::SNS::Topic
+    Condition: EnableNotifications
+    Properties:
+      TopicName: !Sub "${AWS::StackName}-error-notifications"
+      DisplayName: RDS Auto Start/Stop Error Notifications
+
+  ErrorNotificationSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: EnableNotifications
+    Properties:
+      TopicArn: !Ref ErrorNotificationTopic
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+
+  # Lambda Functions
+  AutoStartRDSLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-AutoStartRDSInstance"
+      CodeUri: lambda/AutoStartRDSInstance_improved.py
+      Handler: AutoStartRDSInstance_improved.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Description: Auto Start RDS Instance (from tag AutoStart) - Enhanced Version
+      Events:
+        AutoStartRDSRule:
+          Type: Schedule
+          Properties:
+            Name: !Sub "${AWS::StackName}-AutoStartRDSRule"
+            Description: Auto Start RDS Instance Schedule
+            Schedule: !Ref AutoStartRDSSchedule
+            Enabled: true
+      DeadLetterQueue:
+        Type: SNS
+        TargetArn: !If [EnableNotifications, !Ref ErrorNotificationTopic, !Ref AWS::NoValue]
+
+  AutoStopRDSLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-AutoStopRDSInstance"
+      CodeUri: lambda/AutoStopRDSInstance_improved.py
+      Handler: AutoStopRDSInstance_improved.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Description: Auto Stop RDS Instance (from tag AutoStop) - Enhanced Version
+      Events:
+        AutoStopRDSRule:
+          Type: Schedule
+          Properties:
+            Name: !Sub "${AWS::StackName}-AutoStopRDSRule"
+            Description: Auto Stop RDS Instance Schedule
+            Schedule: !Ref AutoStopRDSSchedule
+            Enabled: true
+      DeadLetterQueue:
+        Type: SNS
+        TargetArn: !If [EnableNotifications, !Ref ErrorNotificationTopic, !Ref AWS::NoValue]
+
+  RDSStartWeekDayLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-RDSStartWeekDay"
+      CodeUri: lambda/RDSStartWeekDay_improved.py
+      Handler: RDSStartWeekDay_improved.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          REGION_TZ: !Ref RegionTZ
+      Description: RDS Start Week Day Time in HH:MM (from tag StartWeekDay) - Enhanced Version
+      Events:
+        RDSStartWeekDayRule:
+          Type: Schedule
+          Properties:
+            Name: !Sub "${AWS::StackName}-RDSStartWeekDayRule"
+            Description: RDS Start triggering every Week Day
+            Schedule: !Ref RDSStartStopWeekDaySchedule
+            Enabled: true
+      DeadLetterQueue:
+        Type: SNS
+        TargetArn: !If [EnableNotifications, !Ref ErrorNotificationTopic, !Ref AWS::NoValue]
+
+  RDSStopWeekDayLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-RDSStopWeekDay"
+      CodeUri: lambda/RDSStopWeekDay_improved.py
+      Handler: RDSStopWeekDay_improved.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          REGION_TZ: !Ref RegionTZ
+      Description: RDS Stop Week Day Time in HH:MM (from tag StopWeekDay) - Enhanced Version
+      Events:
+        RDSStopWeekDayRule:
+          Type: Schedule
+          Properties:
+            Name: !Sub "${AWS::StackName}-RDSStopWeekDayRule"
+            Description: RDS Stop triggering every Week Day
+            Schedule: !Ref RDSStartStopWeekDaySchedule
+            Enabled: true
+      DeadLetterQueue:
+        Type: SNS
+        TargetArn: !If [EnableNotifications, !Ref ErrorNotificationTopic, !Ref AWS::NoValue]
+
+  RDSStartWeekEndLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-RDSStartWeekEnd"
+      CodeUri: lambda/RDSStartWeekEnd_improved.py
+      Handler: RDSStartWeekEnd_improved.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          REGION_TZ: !Ref RegionTZ
+      Description: RDS Start Week End Time in HH:MM (from tag StartWeekEnd) - Enhanced Version
+      Events:
+        RDSStartWeekEndRule:
+          Type: Schedule
+          Properties:
+            Name: !Sub "${AWS::StackName}-RDSStartWeekEndRule"
+            Description: RDS Start triggering every Week End
+            Schedule: !Ref RDSStartStopWeekEndSchedule
+            Enabled: true
+      DeadLetterQueue:
+        Type: SNS
+        TargetArn: !If [EnableNotifications, !Ref ErrorNotificationTopic, !Ref AWS::NoValue]
+
+  RDSStopWeekEndLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-RDSStopWeekEnd"
+      CodeUri: lambda/RDSStopWeekEnd_improved.py
+      Handler: RDSStopWeekEnd_improved.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          REGION_TZ: !Ref RegionTZ
+      Description: RDS Stop Week End Time in HH:MM (from tag StopWeekEnd) - Enhanced Version
+      Events:
+        RDSStopWeekEndRule:
+          Type: Schedule
+          Properties:
+            Name: !Sub "${AWS::StackName}-RDSStopWeekEndRule"
+            Description: RDS Stop triggering every Week End
+            Schedule: !Ref RDSStartStopWeekEndSchedule
+            Enabled: true
+      DeadLetterQueue:
+        Type: SNS
+        TargetArn: !If [EnableNotifications, !Ref ErrorNotificationTopic, !Ref AWS::NoValue]
+
+  # CloudWatch Alarms for monitoring
+  AutoStartErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: EnableMonitoring
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-AutoStart-Errors"
+      AlarmDescription: Monitor errors in AutoStart Lambda function
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref AutoStartRDSLambda
+      AlarmActions:
+        - !If [EnableNotifications, !Ref ErrorNotificationTopic, !Ref AWS::NoValue]
+
+  AutoStopErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: EnableMonitoring
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-AutoStop-Errors"
+      AlarmDescription: Monitor errors in AutoStop Lambda function
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref AutoStopRDSLambda
+      AlarmActions:
+        - !If [EnableNotifications, !Ref ErrorNotificationTopic, !Ref AWS::NoValue]
+
+  # CloudWatch Dashboard
+  MonitoringDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Condition: EnableMonitoring
+    Properties:
+      DashboardName: !Sub "${AWS::StackName}-RDS-AutoStartStop"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/Lambda", "Invocations", "FunctionName", "${AutoStartRDSLambda}" ],
+                  [ ".", "Errors", ".", "." ],
+                  [ ".", "Duration", ".", "." ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "AutoStart Lambda Metrics",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/Lambda", "Invocations", "FunctionName", "${AutoStopRDSLambda}" ],
+                  [ ".", "Errors", ".", "." ],
+                  [ ".", "Duration", ".", "." ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "AutoStop Lambda Metrics",
+                "period": 300
+              }
+            }
+          ]
+        }
+
+Outputs:
+  StackName:
+    Description: Name of the CloudFormation stack
+    Value: !Ref AWS::StackName
+
+  Region:
+    Description: AWS Region
+    Value: !Ref AWS::Region
+
+  Timezone:
+    Description: Configured timezone
+    Value: !Ref RegionTZ
+
+  LambdaLayerArn:
+    Description: ARN of the shared Lambda layer
+    Value: !Ref RDSUtilsLayer
+    Export:
+      Name: !Sub "${AWS::StackName}-RDSUtilsLayer"
+
+  AutoStartLambdaArn:
+    Description: ARN of AutoStart Lambda function
+    Value: !GetAtt AutoStartRDSLambda.Arn
+
+  AutoStopLambdaArn:
+    Description: ARN of AutoStop Lambda function
+    Value: !GetAtt AutoStopRDSLambda.Arn
+
+  NotificationTopicArn:
+    Condition: EnableNotifications
+    Description: ARN of the error notification SNS topic
+    Value: !Ref ErrorNotificationTopic
+
+  DashboardURL:
+    Condition: EnableMonitoring
+    Description: URL to the CloudWatch dashboard
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${AWS::StackName}-RDS-AutoStartStop"
+
+  DocumentationURL:
+    Description: Link to improved documentation
+    Value: "https://github.com/aws-samples/aws-cfn-save-costs-auto-start-stop-rds"
