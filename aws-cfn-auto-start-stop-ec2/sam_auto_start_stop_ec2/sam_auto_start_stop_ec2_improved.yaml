@@ -32,7 +32,7 @@ Parameters:
       Enter a Schedule expression e.g. cron(0 13 ? * MON-FRI *)
     MinLength: 20
     MaxLength: 50
-    AllowedPattern: ^cron\([0-9\*\-\,\/\?\s]+\)$
+    AllowedPattern: ^cron\([a-zA-Z0-9\*\-\,\/\?\s#LW]+\)$
     ConstraintDescription: Must be a valid cron expression
 
   AutoStopEC2Schedule:
@@ -43,7 +43,7 @@ Parameters:
       Enter a Schedule expression e.g. cron(0 1 ? * MON-FRI *)
     MinLength: 20
     MaxLength: 50
-    AllowedPattern: ^cron\([0-9\*\-\,\/\?\s]+\)$
+    AllowedPattern: ^cron\([a-zA-Z0-9\*\-\,\/\?\s#LW]+\)$
     ConstraintDescription: Must be a valid cron expression
 
   EC2StartStopWeekDaySchedule:
@@ -52,7 +52,7 @@ Parameters:
     Description: EC2 Start/Stop triggering every weekday every 5 minutes
     MinLength: 20
     MaxLength: 50
-    AllowedPattern: ^cron\([0-9\*\-\,\/\?\s]+\)$
+    AllowedPattern: ^cron\([a-zA-Z0-9\*\-\,\/\?\s#LW]+\)$
     ConstraintDescription: Must be a valid cron expression
 
   EC2StartStopWeekEndSchedule:
@@ -61,7 +61,7 @@ Parameters:
     Description: EC2 Start/Stop triggering every weekend every 5 minutes
     MinLength: 20
     MaxLength: 50
-    AllowedPattern: ^cron\([0-9\*\-\,\/\?\s]+\)$
+    AllowedPattern: ^cron\([a-zA-Z0-9\*\-\,\/\?\s#LW]+\)$
     ConstraintDescription: Must be a valid cron expression
 
   RegionTZ:

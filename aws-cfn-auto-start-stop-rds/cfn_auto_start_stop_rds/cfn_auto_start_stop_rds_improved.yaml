@@ -47,7 +47,7 @@ Parameters:
     Description: Auto Start RDS Instance (Mon-Fri 9:00 AM EST / 1:00 PM GMT)
     MinLength: 20
     MaxLength: 50
-    AllowedPattern: ^cron\([0-9\*\-\,\/\?\s]+\)$
+    AllowedPattern: ^cron\([a-zA-Z0-9\*\-\,\/\?\s#LW]+\)$
     ConstraintDescription: Must be a valid cron expression
 
   AutoStopRDSSchedule:
@@ -56,7 +56,7 @@ Parameters:
     Description: Auto Stop RDS Instance (Mon-Fri 9:00 PM EST / 1:00 AM GMT)
     MinLength: 20
     MaxLength: 50
-    AllowedPattern: ^cron\([0-9\*\-\,\/\?\s]+\)$
+    AllowedPattern: ^cron\([a-zA-Z0-9\*\-\,\/\?\s#LW]+\)$
     ConstraintDescription: Must be a valid cron expression
 
   RDSStartStopWeekDaySchedule:
@@ -65,7 +65,7 @@ Parameters:
     Description: RDS Start Stop triggering every Week Day every 5 mins
     MinLength: 20
     MaxLength: 50
-    AllowedPattern: ^cron\([0-9\*\-\,\/\?\s]+\)$
+    AllowedPattern: ^cron\([a-zA-Z0-9\*\-\,\/\?\s#LW]+\)$
     ConstraintDescription: Must be a valid cron expression
 
   RDSStartStopWeekEndSchedule:
@@ -74,7 +74,7 @@ Parameters:
     Description: RDS Start Stop triggering every Week End every 5 mins
     MinLength: 20
     MaxLength: 50
-    AllowedPattern: ^cron\([0-9\*\-\,\/\?\s]+\)$
+    AllowedPattern: ^cron\([a-zA-Z0-9\*\-\,\/\?\s#LW]+\)$
     ConstraintDescription: Must be a valid cron expression
 
   RegionTZ:
