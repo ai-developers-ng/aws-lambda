@@ -223,7 +223,7 @@ Resources:
       Role: !GetAtt LambdaRDSRole.Arn
       Handler: index.lambda_handler
       Timeout: 300
-      ReservedConcurrentExecutions: 5
+      #ReservedConcurrentExecutions: 5
       Environment:
         Variables:
           LOG_LEVEL: !Ref LogLevel
@@ -472,7 +472,7 @@ Resources:
       Role: !GetAtt LambdaRDSRole.Arn
       Handler: index.lambda_handler
       Timeout: 300
-      ReservedConcurrentExecutions: 5
+      #ReservedConcurrentExecutions: 5
       Environment:
         Variables:
           LOG_LEVEL: !Ref LogLevel
@@ -737,3 +737,26 @@ Resources:
       State: ENABLED
       Targets:
         - Arn: !GetAtt AutoStopRDSLambda.Arn
+          Id: AutoStopRDSLambda
+
+  # # CloudWatch Events
+  # AutoStartRDSWeekDayEvent:
+  #   Type: AWS::Events::Rule
+  #   Properties:
+  #     Name: !Sub "${AWS::StackName}-AutoStartRDSWeekDayEvent"
+  #     Description: Auto Start RDS Instance Weekday Schedule - Enhanced Version
+  #     ScheduleExpression: !Ref RDSStartStopWeekDaySchedule
+  #     State: ENABLED
+  #     Targets:
+  #       - Arn: !GetAtt AutoStartRDSWeekDayLambda.Arn
+  #         Id: AutoStartRDSWeekDayLambda
+  # AutoStopRDSWeekDayEvent:
+  #   Type: AWS::Events::Rule
+  #   Properties:
+  #     Name: !Sub "${AWS::StackName}-AutoStopRDSWeekDayEvent"
+  #     Description: Auto Stop RDS Instance Weekday Schedule - Enhanced Version
+  #     ScheduleExpression: !Ref RDSStartStopWeekDaySchedule
+  #     State: ENABLED
+  #     Targets:
+  #       - Arn: !GetAtt AutoStopRDSWeekDayLambda.Arn
+  #         Id: AutoStopRDSWeekDayLambda
