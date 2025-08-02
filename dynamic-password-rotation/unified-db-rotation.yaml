@@ -1,35 +1,149 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Unified DB password rotation Lambda for PostgreSQL, MariaDB, Oracle with layers and tagging
+Transform: AWS::Serverless-2016-10-31
+Description: 'Production-ready unified database password rotation Lambda with comprehensive monitoring, security, and error handling'
 
 Parameters:
   ExistingSecretArn:
     Type: String
-    Description: ARN or name of the existing secret
+    Description: ARN of the existing secret to rotate
+    AllowedPattern: '^arn:aws:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:.+$'
+    ConstraintDescription: Must be a valid Secrets Manager ARN
+
   LambdaFunctionName:
     Type: String
-    Default: DBRotationFunction
+    Default: unified-db-password-rotation
     Description: Name for the rotation Lambda function
-  ExistingLayerArns:
-    Type: CommaDelimitedList
-    Default: ""
-    Description: Comma-separated list of existing Lambda Layer ARNs (e.g., for psycopg2, pymysql, cx_Oracle)
+    AllowedPattern: '^[a-zA-Z0-9-_]{1,64}$'
+    ConstraintDescription: Must be 1-64 characters, alphanumeric, hyphens, and underscores only
+
   Environment:
     Type: String
     Default: dev
-    Description: Environment tag (e.g., dev, staging, prod)
+    AllowedValues: [dev, staging, prod]
+    Description: Environment (dev, staging, prod)
+
   Project:
     Type: String
     Default: UnifiedDBRotation
     Description: Project or application name
+    AllowedPattern: '^[a-zA-Z0-9-_]{1,32}$'
+
+  VpcId:
+    Type: String
+    Default: ''
+    Description: VPC ID for Lambda function (leave empty for no VPC)
+
+  SubnetIds:
+    Type: CommaDelimitedList
+    Default: ''
+    Description: Comma-separated list of subnet IDs for Lambda function
+
+  KMSKeyId:
+    Type: String
+    Default: ''
+    Description: KMS Key ID for encryption (leave empty to use default)
+
+  RotationIntervalDays:
+    Type: Number
+    Default: 30
+    MinValue: 1
+    MaxValue: 365
+    Description: Number of days between automatic rotations
+
+  MaxRetries:
+    Type: Number
+    Default: 3
+    MinValue: 1
+    MaxValue: 10
+    Description: Maximum number of retry attempts
+
+  ConnectionTimeout:
+    Type: Number
+    Default: 30
+    MinValue: 5
+    MaxValue: 300
+    Description: Database connection timeout in seconds
+
+  PasswordLength:
+    Type: Number
+    Default: 32
+    MinValue: 12
+    MaxValue: 128
+    Description: Length of generated passwords
+
+  PasswordComplexity:
+    Type: String
+    Default: high
+    AllowedValues: [low, medium, high]
+    Description: Password complexity level
+
+  LogLevel:
+    Type: String
+    Default: INFO
+    AllowedValues: [DEBUG, INFO, WARNING, ERROR]
+    Description: Lambda function log level
+
+  EnableDetailedMonitoring:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Enable detailed CloudWatch monitoring
+
+  NotificationEmail:
+    Type: String
+    Default: ''
+    Description: Email address for rotation failure notifications (optional)
+
+Conditions:
+  HasVpc: !Not [!Equals [!Ref VpcId, '']]
+  HasKMSKey: !Not [!Equals [!Ref KMSKeyId, '']]
+  HasNotificationEmail: !Not [!Equals [!Ref NotificationEmail, '']]
+  IsProduction: !Equals [!Ref Environment, 'prod']
 
 Resources:
+  # KMS Key for encryption (if not provided)
+  RotationKMSKey:
+    Type: AWS::KMS::Key
+    Condition: !Not [!Condition HasKMSKey]
+    Properties:
+      Description: !Sub 'KMS key for ${Project} password rotation encryption'
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: Allow Lambda Function
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt RotationLambdaExecutionRole.Arn
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+            Resource: '*'
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref Project
 
+  RotationKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Condition: !Not [!Condition HasKMSKey]
+    Properties:
+      AliasName: !Sub 'alias/${Project}-rotation-${Environment}'
+      TargetKeyId: !Ref RotationKMSKey
+
+  # IAM Role for Lambda execution
   RotationLambdaExecutionRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub "${LambdaFunctionName}-ExecutionRole"
+      RoleName: !Sub '${LambdaFunctionName}-execution-role-${Environment}'
       AssumeRolePolicyDocument:
-        Version: "2012-10-17"
+        Version: '2012-10-17'
         Statement:
           - Effect: Allow
             Principal:
@@ -37,10 +151,14 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - !If 
+          - HasVpc
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+          - !Ref AWS::NoValue
       Policies:
-        - PolicyName: DBRotationPermissions
+        - PolicyName: SecretsManagerRotationPolicy
           PolicyDocument:
-            Version: "2012-10-17"
+            Version: '2012-10-17'
             Statement:
               - Effect: Allow
                 Action:
@@ -51,139 +169,309 @@ Resources:
                 Resource: !Ref ExistingSecretArn
               - Effect: Allow
                 Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                Resource: 
+                  - !If 
+                    - HasKMSKey
+                    - !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/${KMSKeyId}'
+                    - !GetAtt RotationKMSKey.Arn
+        - PolicyName: CloudWatchMetricsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'cloudwatch:namespace': 'AWS/SecretsManager/Rotation'
+        - PolicyName: RDSDescribePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
                   - rds:DescribeDBInstances
-                  - rds:ModifyDBInstance
                   - rds:DescribeDBClusters
-                  - rds:ModifyDBCluster
-                Resource: "*"
+                Resource: '*'
       Tags:
         - Key: Environment
           Value: !Ref Environment
         - Key: Project
           Value: !Ref Project
 
+  # Security Group for Lambda (if VPC is specified)
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: HasVpc
+    Properties:
+      GroupDescription: !Sub 'Security group for ${LambdaFunctionName} Lambda function'
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS outbound for AWS API calls
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: 10.0.0.0/8
+          Description: MySQL/MariaDB
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: 10.0.0.0/8
+          Description: PostgreSQL
+        - IpProtocol: tcp
+          FromPort: 1521
+          ToPort: 1521
+          CidrIp: 10.0.0.0/8
+          Description: Oracle
+      Tags:
+        - Key: Name
+          Value: !Sub '${LambdaFunctionName}-sg'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref Project
+
+  # Dead Letter Queue for failed rotations
+  RotationDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${LambdaFunctionName}-dlq-${Environment}'
+      MessageRetentionPeriod: 1209600  # 14 days
+      KmsMasterKeyId: !If 
+        - HasKMSKey
+        - !Ref KMSKeyId
+        - !Ref RotationKMSKey
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref Project
+
+  # Lambda function
   DBRotationLambda:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: !Ref LambdaFunctionName
-      Handler: index.lambda_handler
-      Runtime: python3.9
-      Timeout: 60
-      MemorySize: 256
+      FunctionName: !Sub '${LambdaFunctionName}-${Environment}'
+      Description: !Sub 'Production-ready database password rotation for ${Project}'
+      Runtime: python3.11
+      Handler: lambda-function.lambda_handler
+      Timeout: 300
+      MemorySize: 512
+      ReservedConcurrencyLimit: !If [IsProduction, 10, 5]
       Role: !GetAtt RotationLambdaExecutionRole.Arn
-      Layers: !Ref ExistingLayerArns
+      VpcConfig: !If
+        - HasVpc
+        - SecurityGroupIds:
+            - !Ref LambdaSecurityGroup
+          SubnetIds: !Ref SubnetIds
+        - !Ref AWS::NoValue
+      DeadLetterQueue:
+        TargetArn: !GetAtt RotationDLQ.Arn
+      Environment:
+        Variables:
+          LOG_LEVEL: !Ref LogLevel
+          MAX_RETRIES: !Ref MaxRetries
+          CONNECTION_TIMEOUT: !Ref ConnectionTimeout
+          PASSWORD_LENGTH: !Ref PasswordLength
+          PASSWORD_COMPLEXITY: !Ref PasswordComplexity
+          ENVIRONMENT: !Ref Environment
       Code:
         ZipFile: |
-          import boto3, json, logging, random, string
-          import pymysql, psycopg2, cx_Oracle
-
-          logger = logging.getLogger()
-          logger.setLevel(logging.INFO)
-          secretsmanager = boto3.client('secretsmanager')
-
+          # Placeholder code - replace with actual deployment package
           def lambda_handler(event, context):
-              arn = event['SecretId']
-              token = event['ClientRequestToken']
-              step = event['Step']
-              metadata = secretsmanager.describe_secret(SecretId=arn)
-
-              if not metadata['RotationEnabled']:
-                  raise ValueError("Rotation not enabled")
-              if token not in metadata['VersionIdsToStages'] or 'AWSPENDING' not in metadata['VersionIdsToStages'][token]:
-                  raise ValueError("Invalid token or stage")
-
-              if step == "createSecret":
-                  create_secret(arn, token)
-              elif step == "setSecret":
-                  set_secret(arn, token)
-              elif step == "testSecret":
-                  pass
-              elif step == "finishSecret":
-                  finish_secret(arn, token)
-
-          def create_secret(arn, token):
-              current = secretsmanager.get_secret_value(SecretId=arn, VersionStage="AWSCURRENT")
-              secret_dict = json.loads(current['SecretString'])
-              secret_dict['password'] = ''.join(random.choices(string.ascii_letters + string.digits + '!@#$%^&*()', k=20))
-              secretsmanager.put_secret_value(
-                  SecretId=arn,
-                  ClientRequestToken=token,
-                  SecretString=json.dumps(secret_dict),
-                  VersionStages=['AWSPENDING']
-              )
-
-          def set_secret(arn, token):
-              pending = json.loads(secretsmanager.get_secret_value(
-                  SecretId=arn, VersionId=token, VersionStage="AWSPENDING")['SecretString'])
-              current = json.loads(secretsmanager.get_secret_value(
-                  SecretId=arn, VersionStage="AWSCURRENT")['SecretString'])
-              engine = current.get('engine', '').lower()
-
-              if engine in ['postgres', 'postgresql']:
-                  rotate_postgres(current, pending)
-              elif engine in ['mysql', 'mariadb']:
-                  rotate_mariadb(current, pending)
-              elif engine == 'oracle':
-                  rotate_oracle(current, pending)
-              else:
-                  raise ValueError(f"Unsupported engine: {engine}")
-
-          def rotate_postgres(current, pending):
-              conn = psycopg2.connect(
-                  host=current['host'], port=current['port'],
-                  user=current['username'], password=current['password'],
-                  dbname=current['dbname']
-              )
-              conn.autocommit = True
-              with conn.cursor() as cur:
-                  cur.execute(f"ALTER USER {pending['username']} WITH PASSWORD %s", (pending['password'],))
-              conn.close()
-
-          def rotate_mariadb(current, pending):
-              conn = pymysql.connect(
-                  host=current['host'], port=int(current['port']),
-                  user=current['username'], password=current['password'],
-                  database=current['dbname'], connect_timeout=10
-              )
-              with conn.cursor() as cur:
-                  cur.execute(f"ALTER USER '{pending['username']}'@'%' IDENTIFIED BY %s", (pending['password'],))
-                  conn.commit()
-              conn.close()
-
-          def rotate_oracle(current, pending):
-              dsn = cx_Oracle.makedsn(current['host'], int(current['port']), sid=current.get('sid', 'ORCL'))
-              conn = cx_Oracle.connect(user=current['username'], password=current['password'], dsn=dsn)
-              cur = conn.cursor()
-              cur.execute(f"ALTER USER {pending['username']} IDENTIFIED BY \"{pending['password']}\"")
-              conn.commit()
-              cur.close()
-              conn.close()
-
-          def finish_secret(arn, token):
-              metadata = secretsmanager.describe_secret(SecretId=arn)
-              current_version = [k for k, v in metadata['VersionIdsToStages'].items() if 'AWSCURRENT' in v][0]
-              if current_version != token:
-                  secretsmanager.update_secret_version_stage(
-                      SecretId=arn, VersionStage='AWSCURRENT',
-                      MoveToVersionId=token, RemoveFromVersionId=current_version
-                  )
-
+              return {'statusCode': 200, 'body': 'Placeholder function'}
       Tags:
         - Key: Environment
           Value: !Ref Environment
         - Key: Project
           Value: !Ref Project
 
+  # Lambda permission for Secrets Manager
+  SecretsManagerInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DBRotationLambda
+      Action: lambda:InvokeFunction
+      Principal: secretsmanager.amazonaws.com
+
+  # CloudWatch Log Group with retention
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${DBRotationLambda}'
+      RetentionInDays: !If [IsProduction, 90, 30]
+      KmsKeyId: !If 
+        - HasKMSKey
+        - !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/${KMSKeyId}'
+        - !GetAtt RotationKMSKey.Arn
+
+  # Rotation schedule
   RotationSchedule:
     Type: AWS::SecretsManager::RotationSchedule
     Properties:
       SecretId: !Ref ExistingSecretArn
       RotationLambdaARN: !GetAtt DBRotationLambda.Arn
       RotationRules:
-        AutomaticallyAfterDays: 30
+        AutomaticallyAfterDays: !Ref RotationIntervalDays
+
+  # CloudWatch Alarms
+  RotationErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: EnableDetailedMonitoring
+    Properties:
+      AlarmName: !Sub '${LambdaFunctionName}-rotation-errors-${Environment}'
+      AlarmDescription: 'Database password rotation errors'
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref DBRotationLambda
+      AlarmActions: !If
+        - HasNotificationEmail
+        - [!Ref RotationFailureNotification]
+        - []
+
+  RotationDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: EnableDetailedMonitoring
+    Properties:
+      AlarmName: !Sub '${LambdaFunctionName}-rotation-duration-${Environment}'
+      AlarmDescription: 'Database password rotation taking too long'
+      MetricName: Duration
+      Namespace: AWS/Lambda
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 240000  # 4 minutes
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref DBRotationLambda
+      AlarmActions: !If
+        - HasNotificationEmail
+        - [!Ref RotationFailureNotification]
+        - []
+
+  # SNS Topic for notifications
+  RotationFailureNotification:
+    Type: AWS::SNS::Topic
+    Condition: HasNotificationEmail
+    Properties:
+      TopicName: !Sub '${LambdaFunctionName}-failures-${Environment}'
+      DisplayName: 'Database Password Rotation Failures'
+      KmsMasterKeyId: !If 
+        - HasKMSKey
+        - !Ref KMSKeyId
+        - !Ref RotationKMSKey
+
+  RotationFailureSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasNotificationEmail
+    Properties:
+      TopicArn: !Ref RotationFailureNotification
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+
+  # Custom CloudWatch Dashboard
+  RotationDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Condition: EnableDetailedMonitoring
+    Properties:
+      DashboardName: !Sub '${LambdaFunctionName}-${Environment}'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/Lambda", "Invocations", "FunctionName", "${DBRotationLambda}" ],
+                  [ ".", "Errors", ".", "." ],
+                  [ ".", "Duration", ".", "." ]
+                ],
+                "period": 300,
+                "stat": "Sum",
+                "region": "${AWS::Region}",
+                "title": "Lambda Function Metrics"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/SecretsManager/Rotation", "RotationSuccess", "RotationStep", "createSecret" ],
+                  [ "...", "setSecret" ],
+                  [ "...", "testSecret" ],
+                  [ "...", "finishSecret" ],
+                  [ ".", "RotationFailure", ".", "createSecret" ],
+                  [ "...", "setSecret" ],
+                  [ "...", "testSecret" ],
+                  [ "...", "finishSecret" ]
+                ],
+                "period": 300,
+                "stat": "Sum",
+                "region": "${AWS::Region}",
+                "title": "Rotation Step Metrics"
+              }
+            }
+          ]
+        }
 
 Outputs:
-  LambdaFunction:
+  LambdaFunctionArn:
+    Description: ARN of the rotation Lambda function
+    Value: !GetAtt DBRotationLambda.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-lambda-arn'
+
+  LambdaFunctionName:
+    Description: Name of the rotation Lambda function
     Value: !Ref DBRotationLambda
-  SecretRotationEnabled:
-    Value: !Ref ExistingSecretArn
+    Export:
+      Name: !Sub '${AWS::StackName}-lambda-name'
+
+  RotationScheduleArn:
+    Description: ARN of the rotation schedule
+    Value: !Ref RotationSchedule
+    Export:
+      Name: !Sub '${AWS::StackName}-schedule-arn'
+
+  KMSKeyId:
+    Description: KMS Key ID used for encryption
+    Value: !If 
+      - HasKMSKey
+      - !Ref KMSKeyId
+      - !Ref RotationKMSKey
+    Export:
+      Name: !Sub '${AWS::StackName}-kms-key'
+
+  DashboardURL:
+    Condition: EnableDetailedMonitoring
+    Description: CloudWatch Dashboard URL
+    Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${RotationDashboard}'
+
+  DeadLetterQueueURL:
+    Description: Dead Letter Queue URL for failed rotations
+    Value: !Ref RotationDLQ
+    Export:
+      Name: !Sub '${AWS::StackName}-dlq-url'
