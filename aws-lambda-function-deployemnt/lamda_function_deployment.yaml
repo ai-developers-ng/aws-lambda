@@ -1,0 +1,109 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Deploy Lambda function with custom environment variables and layers
+
+Parameters:
+  LambdaFunctionName:
+    Type: String
+    Description: Name of the Lambda function
+  LambdaHandler:
+    Type: String
+    Default: lambda-function.lambda_handler
+    Description: Lambda handler (e.g., file.method)
+  LambdaRuntime:
+    Type: String
+    Default: python3.12
+    AllowedValues:
+      - python3.13
+      - python3.12
+      - python3.11
+      - python3.10
+      - python3.9
+    Description: Lambda runtime
+  LambdaS3Bucket:
+    Type: String
+    Description: S3 bucket containing Lambda code
+  LambdaS3Key:
+    Type: String
+    Description: S3 key for Lambda code ZIP
+  EnvVarsJson:
+    Type: String
+    Description: JSON object of environment variables (e.g., {"VAR1":"value1","VAR2":"value2"})
+  LambdaLayerArns:
+    Type: List<String>
+    Description: List of Lambda Layer ARNs
+  LambdaTimeout:
+    Type: Number
+    Default: 60
+    Description: Lambda function timeout (seconds)
+  LambdaMemorySize:
+    Type: Number
+    Default: 128
+    Description: Lambda function memory size (MB)
+  VpcSubnetIds:
+    Type: List<String>
+    Description: List of VPC Subnet IDs for Lambda function
+  SecurityGroupIds:
+    Type: List<String>
+    Description: List of Security Group IDs for Lambda function
+  Environment:
+    Type: String
+    Default: DEV
+    AllowedValues:
+      - DEV
+      - TEST
+      - STG
+      - PRD
+    Description: Deployment environment (dev, test, prod)
+
+Resources:
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref LambdaFunctionName
+      Handler: !Ref LambdaHandler
+      Runtime: !Ref LambdaRuntime
+      Code:
+        S3Bucket: !Ref LambdaS3Bucket
+        S3Key: !Ref LambdaS3Key
+      Layers: !Ref LambdaLayerArns
+      Environment:
+        Variables:
+          VARS: !Ref EnvVarsJson
+      Timeout: !Ref LambdaTimeout
+      MemorySize: !Ref LambdaMemorySize
+      VpcConfig:
+        SubnetIds: !Ref VpcSubnetIds
+        SecurityGroupIds: !Ref SecurityGroupIds
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: "YourName"
+        - Key: Project
+          Value: "LambdaDeployment"
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${LambdaFunctionName}"
+      RetentionInDays: 365
+  LambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${LambdaFunctionName}-ErrorAlarm"
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LambdaFunctionName
+      AlarmDescription: "Alarm for Lambda function errors"
+      ActionsEnabled: false
+
+Outputs:
+  LambdaFunctionArn:
+    Description: ARN of the deployed Lambda function
+    Value: !GetAtt LambdaFunction.Arn
